@@ -1,6 +1,6 @@
 `include "cpu_6502_instructions.vh"
 
-module cpu_6502_alu (
+module cpu_6502_alu import cpu_6502_pkg::*; (
     input alu_op_t i_operation,
     input i_carry,
     input [7:0] i_lhs,

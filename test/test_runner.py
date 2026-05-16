@@ -13,7 +13,12 @@ def test_runner(test):
     proj_path = Path(__file__).resolve().parent
     sources = []
     sources.append(proj_path / f"{test}.sv")
-    sources.extend(proj_path.glob('../rtl/**/*.sv'))
+    # Include *_pkg.sv files before *.sv files. Verilator parses files in the
+    # order given and requires packages to be declared before any module whose
+    # port list references their types.
+    sources.extend(sorted(proj_path.glob('../rtl/**/*_pkg.sv')))
+    sources.extend(sorted(f for f in proj_path.glob('../rtl/**/*.sv')
+                         if not f.name.endswith('_pkg.sv')))
 
     # Add bus_ram for cpu tests
     if test in ["test_cpu_6502", "test_cpu_6502_reset", "test_mcu", "test_mcu_no_led"]:

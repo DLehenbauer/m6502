@@ -1,6 +1,6 @@
 `include "cpu_6502_instructions.vh"
 
-module cpu_6502 #(
+module cpu_6502 import cpu_6502_pkg::*; #(
     START_PC_ENABLED = 0,
     START_PC = 0
 ) (

@@ -1,5 +1,6 @@
 `include "cpu_6502_instructions.vh"
-module cpu_6502_ir_decoder (
+
+module cpu_6502_ir_decoder import cpu_6502_pkg::*; (
     input [7:0] i_opcode,
     output operand_type_t o_operand_type
 );

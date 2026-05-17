@@ -201,7 +201,8 @@ always @(negedge i_clk or negedge i_reset_n) begin
 
             if (handle_irq || handle_nmi) begin
                 if (active_microinstruction == WRITE_SR)
-                    bus_data_write <= {status_negative, status_overflow, 1'b1, 1'b1, status_decimal,
+                    // Push SR with B=0 (bit 4 clear) to indicate hardware interrupt entry (IRQ/NMI).
+                    bus_data_write <= {status_negative, status_overflow, /* U: */ 1'b1, /* B: */ 1'b0, status_decimal,
                                         status_interrupt, status_zero, status_carry};
                 else
                     bus_data_write <= active_microinstruction == PUSH_PCL ? program_counter[7:0] : program_counter[15:8];
@@ -209,13 +210,15 @@ always @(negedge i_clk or negedge i_reset_n) begin
             else begin
                 priority casez (opcode)
                 OPCODE_TYPE_STA, OPCODE_PHA: bus_data_write <= register_acc;
-                OPCODE_PHP: bus_data_write <= {status_negative, status_overflow, 1'b1, 1'b1, status_decimal,
+                // Push SR with B=1 (bit 4 set) to indicate instruction-initiated push (PHP).
+                OPCODE_PHP: bus_data_write <= {status_negative, status_overflow, /* U: */ 1'b1, /* B: */ 1'b1, status_decimal,
                                 status_interrupt, status_zero, status_carry};
                 OPCODE_TYPE_STX: bus_data_write <= register_x;
                 OPCODE_TYPE_STY: bus_data_write <= register_y;
                 OPCODE_BRK: begin
                     if (active_microinstruction == WRITE_SR)
-                        bus_data_write <= {status_negative, status_overflow, 1'b1, 1'b1, status_decimal,
+                        // Push SR with B=1 (bit 4 set) to indicate instruction-initiated push (BRK).
+                        bus_data_write <= {status_negative, status_overflow, /* U: */ 1'b1, /* B: */ 1'b1, status_decimal,
                                             status_interrupt, status_zero, status_carry};
                     else
                         bus_data_write <= active_microinstruction == PUSH_PCH ? program_counter[15:8] : program_counter[7:0];
@@ -245,16 +248,21 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 init <= 0;
             end
 
-            // opcode fetch
-            if (first_microinstruction) begin
+            // `first_microinstruction` marks the start of any new microcode sequence.
+            // Typically, this is the cycle where the opcode is fetched and latched and
+            // the PC is incremented.
+            //
+            // The exception is during an IRQ/NMI entry when the the microcode sequence
+            // pushes the PC and SR to the stack and loads the new PC from the vector
+            // instead of fetching an opcode.
+            //
+            // Note: During interrupt entry, it's important to retain the previous opcode.
+            // (`current_instruction` is SP + $100, not a valid opcode.)
+            if (first_microinstruction && !handle_irq && !handle_nmi) begin
                 opcode <= current_instruction;
-
-                // Ensure we advance forward always for first instruction
-                if (!handle_irq && !handle_nmi) begin
-                    program_counter <= program_counter + 1;
-                    o_bus_addr <= program_counter + 1;
-                    o_sync <= 1;
-                end
+                program_counter <= program_counter + 1;
+                o_bus_addr <= program_counter + 1;
+                o_sync <= 1;
             end
 
             if (current_microinstruction == MICRO_INIT) begin
@@ -578,7 +586,10 @@ always @(negedge i_clk or negedge i_reset_n) begin
                     endcase
                 end
                 MICRO_EXECUTE: begin
-                    priority casez (opcode)
+                    // Skip opcode-specific register updates during IRQ/NMI
+                    // entry -- the opcode register still holds the previous
+                    // instruction's opcode.
+                    if (!handle_irq && !handle_nmi) priority casez (opcode)
                     OPCODE_PLP, OPCODE_PLA: begin
                         // no updates
                     end
@@ -643,7 +654,11 @@ always @(negedge i_clk or negedge i_reset_n) begin
             if (handle_irq)
                 status_interrupt <= 1;
 
-            priority casez (opcode)
+            // During IRQ/NMI entry, the opcode register still holds the
+            // previous instruction's opcode (which is unrelated to the
+            // interrupt sequence).  Skip the opcode-specific flag updates so
+            // they don't clobber the saved status.  The I flag is set above.
+            if (!handle_irq && !handle_nmi) priority casez (opcode)
             OPCODE_TYPE_BRANCH: begin
             end
             OPCODE_PLP, OPCODE_JSR: begin

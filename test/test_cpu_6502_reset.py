@@ -17,11 +17,19 @@ SR_N = 7  # Negative
 
 # Opcodes
 LDA_IMM = 0xA9
+LDX_IMM = 0xA2
+LDY_IMM = 0xA0
 STA_ABS = 0x8D
 NOP = 0xEA
 JMP_ABS = 0x4C
 INX = 0xE8
+TXS = 0x9A
+SEC = 0x38
+SED = 0xF8
+SEI = 0x78
+CLI = 0x58
 CLV = 0xB8
+ADC_IMM = 0x69
 
 def lo(addr):
     return addr & 0xFF
@@ -60,6 +68,14 @@ def assert_acc(dut, expected):
 def assert_x(dut, expected):
     actual = get_x(dut)
     assert actual == expected, f"X: expected {expected:#04x}, got {actual:#04x}"
+
+def assert_y(dut, expected):
+    actual = get_y(dut)
+    assert actual == expected, f"Y: expected {expected:#04x}, got {actual:#04x}"
+
+def assert_sp(dut, expected):
+    actual = get_sp(dut)
+    assert actual == expected, f"SP: expected {expected:#04x}, got {actual:#04x}"
 
 def assert_pc(dut, expected):
     actual = get_pc(dut)
@@ -271,6 +287,132 @@ async def test_reset_vector_page_boundary(dut):
 
     assert_pc(dut, reset_addr + len(prog))
     assert_acc(dut, 0xEE)
+
+
+# ============================================================
+# Warm reset: registers and flags are re-initialized regardless
+# of pre-reset state.
+# ============================================================
+# A warm reset (asserting reset after the CPU has executed code) must
+# leave the CPU in the same state as a cold reset:
+#
+#   - A = X = Y = SP = 0
+#   - I = 1 (interrupts masked)
+#   - N = V = D = Z = C = 0
+#   - PC loaded from $FFFC/$FFFD
+#
+@cocotb.test()
+async def test_reset_warm(dut):
+    """Warm reset: all registers and flags re-initialize from any prior state.
+
+    Sequence:
+      1. Cold reset, then run a setup program that mutates X, Y, SP, D, I
+         and drives A and the ADC-touched flags (N, V, Z, C) into a known
+         steady state, then loops on ADC so the internal `opcode` register
+         holds OPCODE_TYPE_ADC when reset is asserted.
+      2. Sanity-check the steady state.
+      3. Assert reset (warm reset) and release.
+      4. Verify A = X = Y = SP = 0, PC = reset vector, I = 1, and
+         N = V = D = Z = C = 0.
+    """
+    reset_addr = 0x8000
+
+    # Change registers and flags to known values that differ than reset state.
+    prog = [
+        LDY_IMM, 0xEF,          # Y = $EF  (ADC does not touch Y)
+        LDX_IMM, 0xCC,          # X = $CC  (ADC does not touch X)
+        TXS,                    # SP = $CC (ADC does not touch SP)
+        CLI,                    # I = 0    (ADC does not touch I)
+        LDA_IMM, 0x90,          # A = $90  (valid BCD, bit 7 set -> N=1)
+        SEC,                    # C = 1    (carry-in for the fixed point)
+        SED,                    # D = 1    (ADC runs in BCD mode)
+    ]
+
+    # ADC #$99 with carry-in = 1 in BCD mode is a fixed point of the
+    # ALU for any valid BCD operand A:
+    #     A_next = A + 99 + 1 = A + 100 = A (mod 100, BCD)
+    #     C_out  = 1
+    # So the very first ADC leaves the CPU in this steady state and
+    # every subsequent ADC keeps it there for the rest of the loop:
+    #
+    #     A = $90   (non-zero, valid BCD, != $80 - a stale-opcode bug
+    #                that writes the reset-vector high byte into A
+    #                would be clearly visible)
+    #     N = 1     (opposite of reset N=0)
+    #     C = 1     (opposite of reset C=0)
+    #     D = 1     (opposite of reset D=0; SED above, ADC does not
+    #                touch D)
+    #     I = 0     (opposite of reset I=1; CLI above, ADC does not
+    #                touch I)
+    #     Z = 0     (matches reset; ADC cannot land Z=1 here without
+    #                zeroing A, which would defeat the A-reset check)
+    #     V = 0     (matches reset; the 6502 V flag is meaningless in
+    #                BCD mode, and no ADC fixed point sets V anyway)
+    #
+    # Whichever ADC the warm reset interrupts, the last latched opcode is
+    # OPCODE_TYPE_ADC and the state is known to differ from the reset state
+    # for A, N, C, D, and I.
+    prog += [ADC_IMM, 0x99] * 64
+
+    Clock(dut.i_clk, 100, "ns").start()
+    dut.i_reset_n.value = 0
+    dut.i_rdy.value = 1
+    dut.i_nmi_n.value = 1
+    dut.i_irq_n.value = 1
+    dut.i_so_n.value = 1
+
+    await ClockCycles(dut.i_clk, 2)
+
+    dut.ram.mem[RESET_VECTOR_LO].value = lo(reset_addr)
+    dut.ram.mem[RESET_VECTOR_HI].value = hi(reset_addr)
+    for i, b in enumerate(prog):
+        dut.ram.mem[reset_addr + i].value = b
+
+    # Cold reset, then run long enough to execute the setup program
+    # and reach the ADC #$FF steady state.
+    dut.i_reset_n.value = 1
+    await ClockCycles(dut.i_clk, 30)
+
+    # Sanity: confirm the pre-reset steady state. Every value below is
+    # the opposite of (or distinct from) the reset state, so the
+    # post-reset assertions below cannot pass by coincidence.
+    assert_acc(dut, 0x90)
+    assert_x(dut, 0xCC)
+    assert_y(dut, 0xEF)
+    assert_sp(dut, 0xCC)
+    assert_flag(dut, SR_N, 1, "N (pre-reset)")
+    assert_flag(dut, SR_C, 1, "C (pre-reset)")
+    assert_flag(dut, SR_D, 1, "D (pre-reset)")
+    assert_flag(dut, SR_I, 0, "I (pre-reset)")
+
+    # Warm reset: assert reset without changing memory or the opcode reg.
+    dut.i_reset_n.value = 0
+    await ClockCycles(dut.i_clk, 4)
+    dut.i_reset_n.value = 1
+
+    # Advance the CPU for exactly the init + vector-load sequence
+    # (matches setup_reset_test) so we sample state right after PC
+    # has been loaded from $FFFC/$FFFD but before the first user
+    # instruction is fetched.
+    await ClockCycles(dut.i_clk, 9)
+
+    # PC must be loaded from the reset vector.
+    assert_pc(dut, reset_addr)
+
+    # Registers must be at their reset values. If A is $80 (the reset
+    # vector's high byte), the stale opcode regression has returned.
+    assert_acc(dut, 0x00)
+    assert_x(dut, 0x00)
+    assert_y(dut, 0x00)
+    assert_sp(dut, 0x00)
+
+    # Flags: I=1 (interrupts masked), all others cleared.
+    assert_flag(dut, SR_N, 0, "N")
+    assert_flag(dut, SR_V, 0, "V")
+    assert_flag(dut, SR_D, 0, "D")
+    assert_flag(dut, SR_I, 1, "I")
+    assert_flag(dut, SR_Z, 0, "Z")
+    assert_flag(dut, SR_C, 0, "C")
 
 
 @cocotb.test()

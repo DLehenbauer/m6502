@@ -31,7 +31,6 @@ enum class TestResult {
 };
 
 // Test check function, invoked once per CPU instruction boundary.
-//
 //   pc      - the program counter at the about-to-fetch opcode
 //   trapped - true when this PC has been seen twice in a row at boundary
 //             (CPU is in a tight self-loop)
@@ -40,9 +39,9 @@ using TestCheckFn = TestResult (*)(uint16_t pc, bool trapped, const uint8_t* mem
 
 struct TestCase {
     const char* name;       // Test name for reporting
-    const char* bin;        // Path to raw 64 KiB binary image (relative to executable)
-    uint16_t    start_pc;   // PC to inject via reset vector (per-test entry point)
-    TestCheckFn check;      // Per-cycle verdict callback
+    const char* bin;        // Path to test binary (relative to executable)
+    uint16_t    start_pc;   // Address of test entry point
+    TestCheckFn check;      // Per-instruction verdict callback
 };
 
 // Klaus's functional test ends with a `JMP *` self-trap.  Trapping at $3469
@@ -58,8 +57,7 @@ static TestResult check_functional(uint16_t pc, bool trapped, const uint8_t* /*m
 }
 
 // Decimal test halts at the `db $db` byte (DONE label).  PASS iff the ERROR
-// variable in zero page is 0; otherwise FAIL.  Any unexpected trap is also
-// FAIL.
+// variable in zero page is 0; otherwise FAIL. Any unexpected trap is also FAIL.
 static TestResult check_decimal(uint16_t pc, bool trapped, const uint8_t* mem) {
     if (pc == 0x024B) {
         return mem[0x000B] == 0
@@ -74,7 +72,7 @@ static TestResult check_decimal(uint16_t pc, bool trapped, const uint8_t* mem) {
     return TestResult::Continue;
 }
 
-// Interrupt test: Klaus's `success` macro expands to `jmp *` (a self-trap).
+// Klaus's interrupt test's `success` macro expands to `jmp *` (a self-trap).
 // The automated IRQ / BRK / NMI test ends at $06F5 with this trap.
 //
 // The two later `success` macros at $070F and $072C live inside the "manual
@@ -103,7 +101,7 @@ static const TestCase kTests[] = {
     {"interrupt",  "6502_interrupt_test.bin",  /* start_pc: */ 0x0400, check_interrupt},
 };
 
-// Load a raw 64 KiB binary image into bram via --public-flat-rw.
+// Load a test binary image into bram via `--public-flat-rw`.
 static bool load_bin(Vtest_mcu_klaus* top, const char* path) {
     FILE* f = fopen(path, "rb");
     if (!f) {
@@ -113,10 +111,16 @@ static bool load_bin(Vtest_mcu_klaus* top, const char* path) {
 
     auto& mem = top->rootp->test_mcu_klaus__DOT__bram__DOT__memory;
     const size_t mem_size = sizeof(mem) / sizeof(mem[0]);
+
+    // Zero memory before loading the test image in case we relax the 64 KiB
+    // size requirement in the future.
     memset(&mem[0], 0, sizeof(mem));
 
     const size_t n = fread(&mem[0], sizeof(mem[0]), mem_size, f);
     fclose(f);
+
+    // Currently, we expect test binaries to be exactly 64 KiB, but this could be
+    // relaxed in the future if needed.
     if (n != mem_size) {
         fprintf(stderr, "ERROR: %s: expected %zu bytes, read %zu\n", path, mem_size, n);
         return false;

@@ -46,10 +46,13 @@ RUN wget https://github.com/chipsalliance/verible/releases/download/${VERIBLE_VE
 #   build-essential
 #   flex
 #   help2man
+#   libfl-dev
+#   zlib1g-dev     (for FST waveform support)
 #
-# Python support for various tools:
+# cocotb:
 #
 #   python3
+#   python3-dev    (for embedding Python in simulator processes)
 #   python3-pip
 #   python3-venv
 
@@ -65,10 +68,13 @@ RUN apt-get update && apt-get -y install --no-install-recommends \
     flex \
     gtkwave \
     help2man \
+    libfl-dev \
     python3 \
+    python3-dev \
     python3-pip \
     python3-venv \
-    universal-ctags
+    universal-ctags \
+    zlib1g-dev
 
 # Clean apt cache and temporary files
 RUN apt-get clean && \
@@ -77,11 +83,6 @@ RUN apt-get clean && \
 #
 # Build and install the tools
 #
-
-RUN apt-get update && apt-get -y install --no-install-recommends \
-    libfl-dev \
-    libfl2 \
-    zlib1g-dev
 
 # Install Verilator (built from source)
 # (Do this early as it takes a while).

@@ -15,6 +15,7 @@ SR_Z = 1  # Zero
 SR_I = 2  # Interrupt disable
 SR_D = 3  # Decimal
 SR_B = 4  # Break
+SR_U = 5  # Reserved / unused (always 1 when SR is pushed to stack)
 SR_V = 6  # Overflow
 SR_N = 7  # Negative
 
@@ -306,6 +307,36 @@ def assert_flag(dut, bit, expected, name=""):
     actual = (sr >> bit) & 1
     assert actual == expected, \
         f"Flag {name}(bit {bit}): expected {expected}, got {actual} (SR={sr:#04x})"
+
+async def assert_sr(dut, bit, expected, name="", offset=0):
+    """Assert a single bit in a pushed SR byte on the stack.
+
+    Works for BRK / IRQ / NMI (which push PCH, PCL, SR in order) and for PHP
+    (which pushes SR). In all cases, the byte one below the current SP (offset=0)
+    is the most recently pushed SR.
+
+    `offset` selects which pushed SR byte to inspect. 0 (default) reads
+    the most recently pushed byte, 1 reads the one immediately beneath
+    it, and so on.
+
+    Sanity-checks the U bit (bit 5, always 1 in any pushed SR) to catch calls
+    made when SR was not actually pushed at that location (e.g. after PHA, or
+    before any push has happened).
+    """
+
+    sp = get_sp(dut)
+    addr = 0x0100 | ((sp + 1 + offset) & 0xFF)
+    sr = await read_mem(dut, addr)
+
+    # Sanity check that the value read from the stack is plausibly a pushed SR by
+    # checking the U bit (bit 5) is set.
+    assert (sr >> SR_U) & 1 == 1, \
+        f"assert_sr: byte at {addr:#06x} is {sr:#04x}; U bit (5) is 0, " \
+        f"so this is not a pushed SR (no preceding BRK/PHP/IRQ/NMI?)"
+
+    actual = (sr >> bit) & 1
+    assert actual == expected, \
+        f"Pushed SR {name}(bit {bit}): expected {expected}, got {actual} (SR={sr:#04x})"
 
 def assert_nz(dut, value):
     """Assert N and Z flags match an 8-bit result value."""
@@ -2715,15 +2746,14 @@ async def test_php(dut):
     await setup_and_run(dut, prog, cycles=13)
     assert_pc(dut, START_PC + len(prog))
     assert_sp(dut, 0xFE)
-    val = await read_mem(dut, 0x01FF)
     # Check bit we set
-    assert (val >> SR_C) & 1 == 1, f"Pushed C: expected 1, got 0 (val={val:#04x})"
+    assert_sr(dut, SR_C, 1, "C")
     # Check bits that should be clear
-    assert (val >> SR_V) & 1 == 0, f"Pushed V: expected 0, got 1 (val={val:#04x})"
-    assert (val >> SR_D) & 1 == 0, f"Pushed D: expected 0, got 1 (val={val:#04x})"
-    # PHP always pushes with B (bit 4) and bit 5 set to 1
-    assert (val >> SR_B) & 1 == 1, f"Pushed B: expected 1, got 0 (val={val:#04x})"
-    assert (val >> 5) & 1 == 1, f"Pushed bit5: expected 1, got 0 (val={val:#04x})"
+    assert_sr(dut, SR_V, 0, "V")
+    assert_sr(dut, SR_D, 0, "D")
+    # PHP always pushes with B (bit 4) and U (bit 5) set to 1
+    assert_sr(dut, SR_B, 1, "B")
+    assert_sr(dut, SR_U, 1, "U")
 
 @cocotb.test()
 async def test_plp(dut):
@@ -4020,25 +4050,107 @@ async def test_illegal_opcode_ff(dut):
 
 @cocotb.test()
 async def test_brk(dut):
-    """BRK: pushes PC+2 and status, jumps to IRQ vector, sets I flag."""
+    """BRK: pushes PC+2 and status with B=1, preserves all flags, sets I=1.
+
+    This test covers several closely-related properties of the BRK entry
+    sequence in one program:
+
+      - Basic BRK flow. Execution vectors through $FFFE/$FFFF (same vector
+        as IRQ) and the handler runs.
+      - Pushed-SR signature. BRK must push SR with B=1 (software source),
+        distinguishing it from hardware interrupts.
+      - Flag preservation. The pushed SR must capture the interrupted
+        program's N/V/D/I/Z/C bits exactly, including I=1.
+      - Live N/V/Z/C flags must be preserved by the entry sequence.
+      - The live I flag must be 1 after entry.
+      - Pushed PC = address of BRK opcode + 2 (skipping the signature byte).
+
+    Strategy: load SR with a distinctive non-default pattern (0xE5 =
+    N=1 V=1 U=1 D=0 I=1 Z=0 C=1) via PHA/PLP, then execute BRK. The
+    handler's first instruction is PHP, which snapshots the live SR onto
+    the stack before any handler instruction can perturb the flags.
+    After the handler runs there are two pushed SR bytes on the stack:
+
+      - Top of stack (offset 0): PHP-pushed snapshot of the live SR
+        right after BRK entry.
+      - One byte deeper (offset 1): the BRK-pushed SR itself.
+    """
     prog = [
-        LDX_IMM, 0xFF,       # 2 cycles  $0400
-        TXS,                  # 2 cycles  $0402
-        BRK,                  # 7 cycles  $0403
+        LDX_IMM, 0xFF,        # 2  init stack pointer        $0400
+        TXS,                  # 2                            $0402
+        LDA_IMM, 0xE5,        # 2  Load a distinctive pattern into SR:
+        PHA,                  # 3    N=1 V=1 U=1 D=0 I=1 Z=0 C=1
+        PLP,                  # 4  SR = 0xE5 (I=1)           $0406
+        BRK,                  # 7                            $0407
+        0x00,                 # signature byte (skipped)     $0408
     ]
-    # IRQ handler at $0500 does LDA #$99
+    # Handler at $0500: PHP snapshots the live SR onto the stack, then
+    # LDA #$99 loads a marker so we can confirm the handler actually ran.
     data = {
-        0xFFFE: 0x00,         # IRQ vector low byte
-        0xFFFF: 0x05,         # IRQ vector high byte
-        0x0500: LDA_IMM,      # handler: LDA #$99
-        0x0501: 0x99,
+        0xFFFE: 0x00,         # IRQ/BRK vector low byte
+        0xFFFF: 0x05,         # IRQ/BRK vector high byte
+        0x0500: PHP,          # 3  snapshot live SR
+        0x0501: LDA_IMM,      # 2  marker: A = $99
+        0x0502: 0x99,
     }
-    # LDX(2) + TXS(2) + BRK(7) + LDA(2) = 13
-    await setup_and_run(dut, prog, data=data, cycles=13)
+
+    # Exact cycle count:
+    #   LDX(2)+TXS(2)+LDA(2)+PHA(3)+PLP(4)+BRK(7)+PHP(3)+LDA(2) = 25 cycles.
+    await setup_and_run(dut, prog, data=data, cycles=25)
+
+    # Handler executed both PHP and LDA #$99.
     assert_acc(dut, 0x99)
-    assert_flag(dut, SR_I, 1, "I")
-    # SP should be $FC (pushed PCH, PCL, status = 3 bytes from $FF)
-    assert_sp(dut, 0xFC)
+    # BRK pushed 3 bytes (PCH, PCL, SR); handler's PHP pushed 1 more.
+    assert_sp(dut, 0xFB)
+
+    # Top of stack (offset 0) = PHP-pushed snapshot of live SR right after
+    # BRK entry.
+    #
+    # The N/V/D/Z/C bits must always be preserved:
+    #   N=1 V=1 D=0 Z=0 C=1
+    await assert_sr(dut, SR_N, 1, "live N")
+    await assert_sr(dut, SR_V, 1, "live V")
+    await assert_sr(dut, SR_D, 0, "live D")
+    await assert_sr(dut, SR_Z, 0, "live Z")
+    await assert_sr(dut, SR_C, 1, "live C")
+
+    # The I/B/U bits must be set by BRK entry:
+    #   I=1 (set by BRK; was already 1 from PLP)
+    #   B=1 (PHP always sets B when pushing)
+    #   U=1 (always)
+    await assert_sr(dut, SR_I, 1, "live I")
+    await assert_sr(dut, SR_B, 1, "live B (PHP)")
+    await assert_sr(dut, SR_U, 1, "live U")
+
+    # One byte deeper (offset 1) = SR pushed by BRK entry sequence.
+    #
+    # The N/V/D/Z/C/I bits must always be preserved:
+    #   N=1 V=1 D=0 Z=0 C=1 I=1 (BRK never alters I before pushing)
+    await assert_sr(dut, SR_N, 1, "pushed N", offset=1)
+    await assert_sr(dut, SR_V, 1, "pushed V", offset=1)
+    await assert_sr(dut, SR_D, 0, "pushed D", offset=1)
+    await assert_sr(dut, SR_Z, 0, "pushed Z", offset=1)
+    await assert_sr(dut, SR_C, 1, "pushed C", offset=1)
+    await assert_sr(dut, SR_I, 1, "pushed I", offset=1)
+
+    # The B/U bits must be set by BRK entry:
+    #   B=1 (software source — distinguishes BRK from hardware IRQ/NMI)
+    #   U=1 (always)
+    await assert_sr(dut, SR_B, 1, "pushed B (sw BRK)", offset=1)
+    await assert_sr(dut, SR_U, 1, "pushed U", offset=1)
+
+    # Pushed PC = BRK address + 2 (skipping the signature byte).
+    # BRK is at $0407, signature at $0408, so pushed PC should be $0409.
+    sp = get_sp(dut)
+    push_pcl = await read_mem(dut, 0x0100 | ((sp + 3) & 0xFF))
+    push_pch = await read_mem(dut, 0x0100 | ((sp + 4) & 0xFF))
+    pushed_pc = (push_pch << 8) | push_pcl
+    expected_pc = START_PC + 7 + 2  # BRK at offset 7, +2 for signature byte
+    assert pushed_pc == expected_pc, \
+        f"Pushed PC: expected ${expected_pc:04X} (BRK+2), got ${pushed_pc:04X}"
+
+    # Live I=1 after entry (BRK always sets I).
+    assert_flag(dut, SR_I, 1, "live I (CPU state)")
 
 
 # ============================================================
@@ -4081,28 +4193,59 @@ async def test_rti(dut):
 
 @cocotb.test()
 async def test_irq_basic(dut):
-    """IRQ fires after CLI when i_irq_n is asserted low."""
-    # Program: set up stack, clear interrupt disable, then NOPs
+    """IRQ servicing: fires after CLI, pushes B=0/U=1, preserves flags, sets I=1.
+
+    This test covers several closely-related properties of the IRQ entry
+    sequence in one program:
+
+      - Basic IRQ flow. A pending IRQ fires the instant CLI clears the I
+        flag. Execution vectors through $FFFE/$FFFF and the handler runs.
+      - Pushed-SR signature. Hardware IRQ must push SR with B=0 (hardware
+        source).
+      - Flag preservation. The pushed SR must capture the interrupted
+        program's N/V/D/Z/C bits exactly, and record I=0 (CLI's value
+        just before IRQ entry).
+      - Live N/V/Z/C flags must be preserved by the entry sequence.
+      - The live I flag must be 1 after entry, even when CLI is the
+        most recently latched opcode at the moment entry begins.
+      - Pushed PC = address of the instruction that would have run next
+        (IRQ pushes PC unchanged).
+
+    Strategy: load SR with a distinctive non-default pattern (0xE5 =
+    N=1 V=1 U=1 D=0 I=1 Z=0 C=1) via PHA/PLP, then CLI clears I to
+    arm the pending IRQ. The handler's first instruction is PHP, which
+    snapshots the live SR onto the stack any handler instruction
+    can perturb the flags. After the handler runs there are two pushed
+    SR bytes on the stack:
+
+      - Top of stack (offset 0): PHP-pushed snapshot of the live SR
+        right after IRQ entry.
+      - One byte deeper (offset 1): the IRQ-pushed SR itself.
+    """
     prog = [
-        LDX_IMM, 0xFF,       # 2 cycles  $0400
-        TXS,                  # 2 cycles  $0402
-        CLI,                  # 2 cycles  $0403
-        LDA_IMM, 0x01,       # 2 cycles  $0404
-        NOP,                  # 2 cycles  $0406
-        NOP,                  # 2 cycles  $0407
-        NOP,                  # 2 cycles  $0408
-        NOP,                  # 2 cycles  $0409
+        LDX_IMM, 0xFF,        # 2  init stack pointer
+        TXS,                  # 2
+        LDA_IMM, 0xE5,        # 2  Load a distinctive pattern into SR:
+        PHA,                  # 3    N=1 V=1 U=1 D=0 I=1 Z=0 C=1
+        PLP,                  # 4  SR = 0xE5 (I=1, IRQ stays masked)
+        CLI,                  # 2  SR = 0xE1 (I=0, pending IRQ unmasked)
+        NOP,                  # 2  CLI delays IRQ by one instruction
+        BRK,                  # canary: fail if IRQ delayed by more than
+                              #         one instruction
     ]
-    # IRQ handler at $0500 does LDA #$99
+    # Handler at $0500: PHP snapshots the live SR onto the stack, then
+    # LDA #$99 loads a marker so we can confirm the handler actually ran.
     data = {
         0xFFFE: 0x00,         # IRQ vector low byte
         0xFFFF: 0x05,         # IRQ vector high byte
-        0x0500: LDA_IMM,      # handler: LDA #$99
-        0x0501: 0x99,
+        0x0500: PHP,          # 3  snapshot live SR
+        0x0501: LDA_IMM,      # 2  marker: A = $99
+        0x0502: 0x99,
     }
 
     Clock(dut.i_clk, 100, "ns").start()
     dut.i_reset_n.value = 0
+    dut.i_rdy.value = 1
     dut.i_nmi_n.value = 1
     dut.i_irq_n.value = 1
 
@@ -4117,18 +4260,71 @@ async def test_irq_basic(dut):
     await ClockCycles(dut.i_clk, 1)
     await ClockCycles(dut.i_clk, 6)
 
-    # Let LDX, TXS, CLI, LDA execute: 2+2+2+2 = 8 cycles
-    await ClockCycles(dut.i_clk, 8)
+    # Let setup run far enough to begin the first NOP (after PLP). At this
+    # point I=1, so it's safe to assert IRQ without it firing.
+    # LDX(2)+TXS(2)+LDA(2)+PHA(3)+PLP(4) = 13 cycles to complete PLP.
+    await ClockCycles(dut.i_clk, 13)
 
-    # Assert IRQ (active low)
+    # Assert IRQ while I=1 (masked).
     dut.i_irq_n.value = 0
 
-    # Wait for IRQ to be serviced: 7 cycles for interrupt sequence + 2 for LDA in handler
-    await ClockCycles(dut.i_clk, 9)
+    # Exact cycle count after IRQ assertion:
+    #   CLI (2) + 1 NOP delay slot (2) = 4 cycles to clear the CLI delay
+    #   slot, + 7 for IRQ entry, + 3 for handler PHP, + 2 for LDA #$99
+    #   = 16 cycles to ACC=$99 visible.
+    await ClockCycles(dut.i_clk, 2 + 2 + 7 + 3 + 2)
 
+    # Handler executed both PHP and LDA #$99.
     assert_acc(dut, 0x99)
-    assert_flag(dut, SR_I, 1, "I")
-    assert_sp(dut, 0xFC)
+    # IRQ entry pushed 3 bytes (PCH, PCL, SR); handler's PHP pushed 1 more.
+    assert_sp(dut, 0xFB)
+
+    # Top of stack (offset 0) = PHP-pushed snapshot of live SR right after
+    # interrupt entry.
+    #
+    # The N/V/D/Z/C bits must always be preserved:
+    #   N=1 V=1 D=0 Z=0 C=1
+    await assert_sr(dut, SR_N, 1, "live N")
+    await assert_sr(dut, SR_V, 1, "live V")
+    await assert_sr(dut, SR_D, 0, "live D")
+    await assert_sr(dut, SR_Z, 0, "live Z")
+    await assert_sr(dut, SR_C, 1, "live C")
+
+    # The I/B/U bits must be set by interupt entry:
+    #   I=1 (even though CLI was the last latched opcode)
+    #   B=0 (hardware source)
+    #   U=1 (always)
+    await assert_sr(dut, SR_I, 1, "live I")
+    await assert_sr(dut, SR_B, 1, "live B (PHP)")
+    await assert_sr(dut, SR_U, 1, "live U")
+
+    # One byte deeper (offset 1) = SR pushed by interrupt entry sequence.
+    #
+    # The N/V/D/Z/C/I bits must always be preserved:
+    #   N=1 V=1 D=0 Z=0 C=1 I=0 (CLI cleared I before entry)
+    await assert_sr(dut, SR_N, 1, "pushed N", offset=1)
+    await assert_sr(dut, SR_V, 1, "pushed V", offset=1)
+    await assert_sr(dut, SR_D, 0, "pushed D", offset=1)
+    await assert_sr(dut, SR_Z, 0, "pushed Z", offset=1)
+    await assert_sr(dut, SR_C, 1, "pushed C", offset=1)
+    await assert_sr(dut, SR_I, 0, "pushed I", offset=1)
+
+    # The B/U bits must be set by interupt entry:
+    #   B=0 (hardware source)
+    #   U=1 (always)
+    await assert_sr(dut, SR_B, 0, "pushed B (hw IRQ)", offset=1)
+    await assert_sr(dut, SR_U, 1, "pushed U", offset=1)
+
+    # Pushed PC = address of the instruction that would have run next
+    # (the BRK canary). IRQ pushes the actual PC unchanged (unlike BRK,
+    # which pushes PC+2).
+    sp = get_sp(dut)
+    push_pcl = await read_mem(dut, 0x0100 | ((sp + 3) & 0xFF))
+    push_pch = await read_mem(dut, 0x0100 | ((sp + 4) & 0xFF))
+    pushed_pc = (push_pch << 8) | push_pcl
+    expected_pc = START_PC + 9  # BRK canary at offset 9
+    assert pushed_pc == expected_pc, \
+        f"Pushed PC: expected ${expected_pc:04X} (BRK canary), got ${pushed_pc:04X}"
 
 
 @cocotb.test()
@@ -4193,33 +4389,62 @@ async def test_irq_masked(dut):
 
 @cocotb.test()
 async def test_nmi_basic(dut):
-    """NMI fires even when I flag is set (non-maskable)."""
+    """NMI servicing: fires even with I=1, pushes B=0/U=1, preserves all flags.
+
+    This test covers several closely-related properties of the NMI entry
+    sequence in one program:
+
+      - Non-maskability. NMI fires even with I=1, vectoring through
+        $FFFA/$FFFB regardless of the I flag's value.
+      - Pushed-SR signature. Hardware NMI must push SR with B=0 (hardware
+        source).
+      - Flag preservation. The pushed SR must capture the interrupted
+        program's N/V/D/I/Z/C bits exactly, including I=1 (NMI never
+        changes I before pushing it).
+      - Live N/V/Z/C flags must be preserved by the entry sequence.
+      - The live I flag must be 1 after entry.
+      - Pushed PC = address of the instruction that would have run next
+        (NMI pushes PC unchanged).
+
+    Strategy: load SR with a distinctive non-default pattern (0xE5 =
+    N=1 V=1 U=1 D=0 I=1 Z=0 C=1) via PHA/PLP. I=1 in the loaded pattern
+    proves non-maskability when the NMI subsequently fires. The handler's
+    first instruction is PHP, which snapshots the live SR onto the stack
+    before any handler instruction can perturb the flags. After the
+    handler runs there are two pushed SR bytes on the stack:
+
+      - Top of stack (offset 0): PHP-pushed snapshot of the live SR
+        right after NMI entry.
+      - One byte deeper (offset 1): the NMI-pushed SR itself.
+    """
     prog = [
-        LDX_IMM, 0xFF,       # 2 cycles  $0400
-        TXS,                  # 2 cycles  $0402
-        SEI,                  # 2 cycles  $0403
-        LDA_IMM, 0x01,       # 2 cycles  $0404
-        NOP,                  # 2 cycles  $0406
-        NOP,                  # 2 cycles  $0407
-        NOP,                  # 2 cycles  $0408
-        NOP,                  # 2 cycles  $0409
+        LDX_IMM, 0xFF,        # 2  init stack pointer
+        TXS,                  # 2
+        LDA_IMM, 0xE5,        # 2  Load a distinctive pattern into SR:
+        PHA,                  # 3    N=1 V=1 U=1 D=0 I=1 Z=0 C=1
+        PLP,                  # 4  SR = 0xE5 (I=1, NMI must ignore it).
+                              #     NMI is asserted on PLP's 1st cycle so
+                              #     the 3-negedge sync-chain latency runs
+                              #     in parallel with PLP's remaining cycles
+                              #     and pending_nmi is set just in time
+                              #     for the boundary check at PLP's end.
+                              #     NMI fires immediately after PLP
+                              #     (before BRK).
+        BRK,                  # canary: fail if NMI didn't fire after PLP
     ]
-    # NMI handler at $0600 does LDA #$BB then NOPs
+    # Handler at $0600: PHP snapshots the live SR onto the stack, then
+    # LDA #$BB loads a marker so we can confirm the handler actually ran.
     data = {
         0xFFFA: 0x00,         # NMI vector low byte
         0xFFFB: 0x06,         # NMI vector high byte
-        0x0600: LDA_IMM,      # handler: LDA #$BB
-        0x0601: 0xBB,
-        0x0602: NOP,          # padding for remaining cycles
-        0x0603: NOP,
-        0x0604: NOP,
-        0x0605: NOP,
-        0x0606: NOP,
-        0x0607: NOP,
+        0x0600: PHP,          # 3  snapshot live SR
+        0x0601: LDA_IMM,      # 2  marker: A = $BB
+        0x0602: 0xBB,
     }
 
     Clock(dut.i_clk, 100, "ns").start()
     dut.i_reset_n.value = 0
+    dut.i_rdy.value = 1
     dut.i_nmi_n.value = 1
     dut.i_irq_n.value = 1
 
@@ -4234,18 +4459,74 @@ async def test_nmi_basic(dut):
     await ClockCycles(dut.i_clk, 1)
     await ClockCycles(dut.i_clk, 6)
 
-    # Let LDX, TXS, SEI, LDA execute: 2+2+2+2 = 8 cycles
-    await ClockCycles(dut.i_clk, 8)
+    # Let setup run through PHA + PLP's first cycle, then assert NMI
+    # at the latest moment that still lets pending_nmi propagate in time.
+    # LDX(2)+TXS(2)+LDA(2)+PHA(3)+PLP partial(1) = 10 cycles.
+    await ClockCycles(dut.i_clk, 10)
 
-    # Trigger NMI (falling edge)
+    # Trigger NMI on the falling edge. I=1 must not mask it.
+    # Sync chain takes 3 negedges (sync, sync2, edge-detect). With cocotb's
+    # PLI write semantics, the assertion takes effect by negedge 11, giving
+    # exactly the 3 negedges needed before the posedge-14 boundary check.
+    # Any later and BRK would fire instead of the NMI handler.
     dut.i_nmi_n.value = 0
 
-    # Wait for NMI to be serviced: 7 cycles + LDA(2) + NOPs
-    await ClockCycles(dut.i_clk, 20)
+    # Exact cycle count after NMI assertion:
+    #   PLP remaining (3) + 7 for NMI entry + 3 for handler PHP
+    #   + 2 for LDA #$BB = 15 cycles to ACC=$BB visible.
+    await ClockCycles(dut.i_clk, 3 + 7 + 3 + 2)
 
-    # NMI should fire despite I flag being set
+    # Handler executed both PHP and LDA #$BB.
     assert_acc(dut, 0xBB)
-    assert_sp(dut, 0xFC)
+    # NMI entry pushed 3 bytes (PCH, PCL, SR); handler's PHP pushed 1 more.
+    assert_sp(dut, 0xFB)
+
+    # Top of stack (offset 0) = PHP-pushed snapshot of live SR right after
+    # interrupt entry.
+    #
+    # The N/V/D/Z/C bits must always be preserved:
+    #   N=1 V=1 D=0 Z=0 C=1
+    await assert_sr(dut, SR_N, 1, "live N")
+    await assert_sr(dut, SR_V, 1, "live V")
+    await assert_sr(dut, SR_D, 0, "live D")
+    await assert_sr(dut, SR_Z, 0, "live Z")
+    await assert_sr(dut, SR_C, 1, "live C")
+
+    # The I/B/U bits must be set by interupt entry:
+    #   I=1 (set by NMI entry; was already 1 from PLP)
+    #   B=0 (hardware source)
+    #   U=1 (always)
+    await assert_sr(dut, SR_I, 1, "live I")
+    await assert_sr(dut, SR_B, 1, "live B (PHP)")
+    await assert_sr(dut, SR_U, 1, "live U")
+
+    # One byte deeper (offset 1) = SR pushed by interrupt entry sequence.
+    #
+    # The N/V/D/Z/C/I bits must always be preserved:
+    #   N=1 V=1 D=0 Z=0 C=1 I=1 (NMI never alters I before pushing)
+    await assert_sr(dut, SR_N, 1, "pushed N", offset=1)
+    await assert_sr(dut, SR_V, 1, "pushed V", offset=1)
+    await assert_sr(dut, SR_D, 0, "pushed D", offset=1)
+    await assert_sr(dut, SR_Z, 0, "pushed Z", offset=1)
+    await assert_sr(dut, SR_C, 1, "pushed C", offset=1)
+    await assert_sr(dut, SR_I, 1, "pushed I", offset=1)
+
+    # The B/U bits must be set by interupt entry:
+    #   B=0 (hardware source)
+    #   U=1 (always)
+    await assert_sr(dut, SR_B, 0, "pushed B (hw NMI)", offset=1)
+    await assert_sr(dut, SR_U, 1, "pushed U", offset=1)
+
+    # Pushed PC = address of the instruction that would have run next
+    # (the BRK canary). NMI pushes the actual PC unchanged (unlike BRK,
+    # which pushes PC+2).
+    sp = get_sp(dut)
+    push_pcl = await read_mem(dut, 0x0100 | ((sp + 3) & 0xFF))
+    push_pch = await read_mem(dut, 0x0100 | ((sp + 4) & 0xFF))
+    pushed_pc = (push_pch << 8) | push_pcl
+    expected_pc = START_PC + 7  # BRK canary at offset 7
+    assert pushed_pc == expected_pc, \
+        f"Pushed PC: expected ${expected_pc:04X} (BRK canary), got ${pushed_pc:04X}"
 
 
 @cocotb.test()

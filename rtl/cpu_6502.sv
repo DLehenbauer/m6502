@@ -205,7 +205,8 @@ always @(negedge i_clk or negedge i_reset_n) begin
 
             if (handle_irq || handle_nmi) begin
                 if (active_microinstruction == WRITE_SR)
-                    bus_data_write <= {status_negative, status_overflow, 1'b1, 1'b1, status_decimal,
+                    // Push SR with B=0 (bit 4 clear) to indicate hardware source (IRQ/NMI).
+                    bus_data_write <= {status_negative, status_overflow, /* U: */ 1'b1, /* B: */ 1'b0, status_decimal,
                                         status_interrupt, status_zero, status_carry};
                 else
                     bus_data_write <= active_microinstruction == PUSH_PCL ? program_counter[7:0] : program_counter[15:8];
@@ -213,13 +214,17 @@ always @(negedge i_clk or negedge i_reset_n) begin
             else begin
                 priority casez (opcode)
                 OPCODE_TYPE_STA, OPCODE_PHA: bus_data_write <= register_acc;
-                OPCODE_PHP: bus_data_write <= {status_negative, status_overflow, 1'b1, 1'b1, status_decimal,
-                                status_interrupt, status_zero, status_carry};
+                OPCODE_PHP: begin
+                    // Push SR with B=1 (bit 4 set) to indicate software source (PHP).
+                    bus_data_write <= {status_negative, status_overflow, /* U: */ 1'b1, /* B: */ 1'b1, status_decimal,
+                                        status_interrupt, status_zero, status_carry};
+                end
                 OPCODE_TYPE_STX: bus_data_write <= register_x;
                 OPCODE_TYPE_STY: bus_data_write <= register_y;
                 OPCODE_BRK: begin
                     if (active_microinstruction == WRITE_SR)
-                        bus_data_write <= {status_negative, status_overflow, 1'b1, 1'b1, status_decimal,
+                        // Push SR with B=1 (bit 4 set) to indicate software source (BRK).
+                        bus_data_write <= {status_negative, status_overflow, /* U: */ 1'b1, /* B: */ 1'b1, status_decimal,
                                             status_interrupt, status_zero, status_carry};
                     else
                         bus_data_write <= active_microinstruction == PUSH_PCH ? program_counter[15:8] : program_counter[7:0];
@@ -249,12 +254,14 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 init <= 0;
             end
 
-            // opcode fetch
             if (first_microinstruction) begin
-                opcode <= current_instruction;
-
-                // Ensure we advance forward always for first instruction
-                if (!handle_irq && !handle_nmi) begin
+                if (handle_irq || handle_nmi) begin
+                    // Set `opcode` to NOP so the vector-load MICRO_EXECUTE at the end of the interrupt
+                    // entry sequence preserves the interrupted instruction's flags and registers.
+                    opcode <= OPCODE_NOP;
+                end else begin
+                    // Normal instruction sequence: latch the opcode from the bus and increment PC.
+                    opcode <= current_instruction;
                     program_counter <= program_counter + 1;
                     o_bus_addr <= program_counter + 1;
                     o_sync <= 1;

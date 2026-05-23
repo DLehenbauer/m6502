@@ -1,0 +1,37 @@
+{
+    "verilog.formatting.veribleVerilogFormatter.arguments": "--indentation_spaces 4",
+    "verilog.linting.iverilog.arguments": "-Y .sv -y gw/EconoPET/src",
+    "verilog.linting.linter": "verilator",
+    "verilog.linting.verilator.arguments": "--sv -Igw/EconoPET -Igw/EconoPET/src gw/EconoPET/src/common_pkg.sv",
+    "cSpell.words": [
+        "backpressure",
+        "CRTC",
+        "datasheet",
+        "deassert",
+        "deasserted",
+        "deasserting",
+        "deasserts",
+        "demultiplexer",
+        "demux",
+        "Efinix",
+        "GPIO",
+        "leds",
+        "Lehenbauer",
+        "synthesizable",
+        "Trion",
+        "Verilog",
+        "VROM"
+    ],
+    "cSpell.dictionaryDefinitions": [
+        {
+            "name": "verilog",
+            "path": "./.vscode/verilog-keywords.txt"
+        }
+    ],
+    "cSpell.dictionaries": [
+        "verilog"
+    ],
+    "github.copilot.chat.commitMessageGeneration.instructions": [
+        { "file": ".github/instructions/commit-message.instructions.md" },
+    ]
+}

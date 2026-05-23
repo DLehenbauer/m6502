@@ -1,0 +1,29 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/debian
+{
+    "name": "EconoPET",
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    // Keep uv's cache on the same filesystem as the workspace bind-mount so
+    // that uv can hardlink wheels into .venv instead of falling back to full
+    // copies. Using ${containerWorkspaceFolder} avoids hardcoding the path.
+    "containerEnv": {
+        "UV_CACHE_DIR": "${containerWorkspaceFolder}/.uv-cache"
+    },
+    "customizations": {
+        "vscode": {
+            // Add the IDs of extensions you want installed when the container is created.
+            "extensions": [
+                "DavidAnson.vscode-markdownlint",
+                "GitHub.copilot-chat",
+                "ms-vscode.cpptools-extension-pack",
+                "mshr-h.veriloghdl",
+                "mutantdino.resourcemonitor",
+                "shd101wyy.markdown-preview-enhanced",
+                "streetsidesoftware.code-spell-checker",
+                "xaver.clang-format"
+            ]
+        }
+    }
+}

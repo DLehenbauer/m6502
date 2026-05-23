@@ -1,6 +1,5 @@
 bin
 sim_build
-.vscode
 *.swp
 __pycache__
 test/obj_dir*
@@ -16,6 +15,7 @@ build
 .pytest_cache/
 .venv/
 venv/
+.uv-cache/
 
 # Test results
 results.xml

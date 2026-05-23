@@ -1,3 +1,4 @@
+from collections import namedtuple
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, RisingEdge
 import cocotb
@@ -346,10 +347,15 @@ def assert_nz(dut, value):
 async def read_mem(dut, addr):
     return int(dut.ram.mem[addr].value)
 
-async def setup_and_run(dut, program, zp_data=None, data=None, cycles=50):
-    """
-    Reset CPU, write program at START_PC, optionally write data to memory,
-    release reset, run for N cycles.
+async def init_cpu(dut, program, zp_data=None, data=None, vectors=None):
+    """Bring the CPU out of reset with `program` loaded at START_PC.
+
+    Optional `zp_data`, `data`, and `vectors` dicts write extra memory bytes.
+    The three are semantically identical (each maps addr -> byte). The separate
+    parameters exist only to document caller intent.
+
+    Returns immediately after releasing reset.  Use setup_and_run() to also wait
+    for init + N cycles.
     """
     Clock(dut.i_clk, 100, "ns").start()
     dut.i_reset_n.value = 0
@@ -363,14 +369,20 @@ async def setup_and_run(dut, program, zp_data=None, data=None, cycles=50):
     for i, b in enumerate(program):
         dut.ram.mem[START_PC + i].value = b
 
-    if zp_data:
-        for addr, val in zp_data.items():
-            dut.ram.mem[addr].value = val
+    # Apply each (addr -> byte) dict to RAM in turn.
+    for mem_dict in (zp_data, data, vectors):
+        if mem_dict:
+            for addr, val in mem_dict.items():
+                dut.ram.mem[addr].value = val
 
-    if data:
-        for addr, val in data.items():
-            dut.ram.mem[addr].value = val
+    dut.i_reset_n.value = 1
 
+async def setup_and_run(dut, program, zp_data=None, data=None, cycles=50):
+    """
+    Reset CPU, write program at START_PC, optionally write data to memory,
+    release reset, run for N cycles.
+    """
+    await init_cpu(dut, program, zp_data=zp_data, data=data)
 
     # wait for system init (6 cycles)
     dut.i_reset_n.value = 1
@@ -379,6 +391,50 @@ async def setup_and_run(dut, program, zp_data=None, data=None, cycles=50):
 
     await ClockCycles(dut.i_clk, cycles)
 
+# Snapshot of bus signals returned by sample_bus()
+BusSample = namedtuple('BusSample', ['sync', 'addr', 'rw', 'data'])
+
+def sample_bus(dut):
+    """Return a BusSample snapshot of the bus at the current simulation time.
+
+    All state updates in cpu_6502 happen on negedge i_clk. SYNC, address, and RW
+    are valid for the full bus cycle that follows each falling edge. Sampling at
+    RisingEdge (mid-cycle / start of PHI2) gives settled values.
+
+    `data` is the logical byte being transferred on this cycle:
+      - read cycles (rw=1): mem[addr] (what the CPU will latch).
+      - write cycles (rw=0): bus_write_data (what the CPU is driving).
+    """
+    rw = int(dut.bus_rw.value)
+    addr = int(dut.bus_addr.value)
+
+    return BusSample(
+        sync=int(dut.cpu_sync.value),
+        addr=addr,
+        rw=rw,
+        data=int(dut.ram.mem[addr].value) if rw == 1
+             else int(dut.bus_write_data.value),
+    )
+
+def assert_opcode_fetch(dut, expected_opcode, expected_addr=None):
+    """Sample the bus and assert that the current cycle is an opcode fetch of
+    `expected_opcode` (SYNC=1, RW=1 read, data matches). If `expected_addr` is
+    provided, also asserts the address bus matches.
+
+    Does NOT advance the clock. The caller is responsible for landing on the
+    PHI2 of the expected cycle (typically via `await RisingEdge(dut.i_clk)`).
+    Returns the BusSample for any follow-up checks.
+    """
+    s = sample_bus(dut)
+    assert s.sync == 1 and s.rw == 1 and s.data == expected_opcode, (
+        f"Expected opcode fetch of {expected_opcode:#04x}, "
+        f"got sync={s.sync}, rw={s.rw}, data={s.data:#04x} "
+        f"(PC={s.addr:#06x})")
+    if expected_addr is not None:
+        assert s.addr == expected_addr, (
+            f"Opcode fetch addr: expected {expected_addr:#06x}, "
+            f"got {s.addr:#06x}")
+    return s
 
 # ============================================================
 # ADC - Add with Carry
@@ -4094,9 +4150,52 @@ async def test_brk(dut):
         0x0502: 0x99,
     }
 
-    # Exact cycle count:
-    #   LDX(2)+TXS(2)+LDA(2)+PHA(3)+PLP(4)+BRK(7)+PHP(3)+LDA(2) = 25 cycles.
-    await setup_and_run(dut, prog, data=data, cycles=25)
+    # Run through LDX(2)+TXS(2)+LDA(2)+PHA(3)+PLP(4) to land at the BRK opcode
+    # fetch.
+    await setup_and_run(dut, prog, data=data, cycles=13)
+    assert_opcode_fetch(dut, BRK)
+
+    # Advance to PHI2 of BRK internal cycle 1.
+    await RisingEdge(dut.i_clk)
+
+    # The next 6 cycles are BRK's internal sequence. None are opcode fetches,
+    # so SYNC must be LOW on every one. Each cycle's address and RW direction
+    # is exactly specified:
+    #   cyc | addr   | rw | description
+    #   ----+--------+----+-------------------------
+    #    1  | $0408  |  1 | read signature byte (PC+1)
+    #    2  | $01FF  |  0 | push PCH
+    #    3  | $01FE  |  0 | push PCL
+    #    4  | $01FD  |  0 | push SR
+    #    5  | $FFFE  |  1 | read vector low
+    #    6  | $FFFF  |  1 | read vector high
+    brk_internal_seq = [
+        (START_PC + 8, 1, "read signature"),
+        (0x01FF,       0, "push PCH"),
+        (0x01FE,       0, "push PCL"),
+        (0x01FD,       0, "push SR"),
+        (0xFFFE,       1, "read vector lo"),
+        (0xFFFF,       1, "read vector hi"),
+    ]
+    for cyc, (exp_addr, exp_rw, label) in enumerate(brk_internal_seq, start=1):
+        s = sample_bus(dut)
+        assert s.sync == 0, (
+            f"BRK cyc {cyc}/6 ({label}): SYNC must be 0, got 1 "
+            f"(addr={s.addr:#06x})")
+        assert s.addr == exp_addr, (
+            f"BRK cyc {cyc}/6 ({label}): expected addr={exp_addr:#06x}, "
+            f"got {s.addr:#06x}")
+        assert s.rw == exp_rw, (
+            f"BRK cyc {cyc}/6 ({label}): expected rw={exp_rw}, got {s.rw} "
+            f"(addr={s.addr:#06x})")
+        await RisingEdge(dut.i_clk)
+
+    # We've landed on the opcode fetch for PHP at $0500.
+    assert_opcode_fetch(dut, PHP)
+
+    # Run PHP (2 remaining cycles) + LDA #$99 (2 cycles) + 1 to land at a
+    # PHI2 after the negedge that latches A.
+    await ClockCycles(dut.i_clk, 5)
 
     # Handler executed both PHP and LDA #$99.
     assert_acc(dut, 0x99)
@@ -4268,11 +4367,49 @@ async def test_irq_basic(dut):
     # Assert IRQ while I=1 (masked).
     dut.i_irq_n.value = 0
 
-    # Exact cycle count after IRQ assertion:
-    #   CLI (2) + 1 NOP delay slot (2) = 4 cycles to clear the CLI delay
-    #   slot, + 7 for IRQ entry, + 3 for handler PHP, + 2 for LDA #$99
-    #   = 16 cycles to ACC=$99 visible.
-    await ClockCycles(dut.i_clk, 2 + 2 + 7 + 3 + 2)
+    # Wait 4 cycles (CLI + NOP delay slot) to land at PHI2 of IRQ entry cycle 1.
+    await ClockCycles(dut.i_clk, 4)
+
+    # The next 7 cycles are the IRQ entry sequence. None are opcode fetches,
+    # so SYNC must be LOW on every one. Each cycle's address and RW direction
+    # is exactly specified:
+    #   cyc | addr   | rw | description
+    #   ----+--------+----+--------------------------
+    #    1  | $0409  |  1 | dummy read at PC (BRK canary at START_PC+9)
+    #    2  | $01FF  |  1 | dummy read on stack page
+    #    3  | $01FF  |  0 | push PCH
+    #    4  | $01FE  |  0 | push PCL
+    #    5  | $01FD  |  0 | push SR
+    #    6  | $FFFE  |  1 | read vector low
+    #    7  | $FFFF  |  1 | read vector high
+    irq_entry_seq = [
+        (START_PC + 9, 1, "dummy read at PC"),
+        (0x01FF,       1, "dummy read on stack"),
+        (0x01FF,       0, "push PCH"),
+        (0x01FE,       0, "push PCL"),
+        (0x01FD,       0, "push SR"),
+        (0xFFFE,       1, "read vector lo"),
+        (0xFFFF,       1, "read vector hi"),
+    ]
+    for cyc, (exp_addr, exp_rw, label) in enumerate(irq_entry_seq, start=1):
+        s = sample_bus(dut)
+        assert s.sync == 0, (
+            f"IRQ cyc {cyc}/7 ({label}): SYNC must be 0, got 1 "
+            f"(addr={s.addr:#06x})")
+        assert s.addr == exp_addr, (
+            f"IRQ cyc {cyc}/7 ({label}): expected addr={exp_addr:#06x}, "
+            f"got {s.addr:#06x}")
+        assert s.rw == exp_rw, (
+            f"IRQ cyc {cyc}/7 ({label}): expected rw={exp_rw}, got {s.rw} "
+            f"(addr={s.addr:#06x})")
+        await RisingEdge(dut.i_clk)
+
+    # We've landed on the opcode fetch for PHP at $0500.
+    assert_opcode_fetch(dut, PHP)
+
+    # Run PHP (2 remaining cycles) + LDA #$99 (2 cycles) + 1 to land at a
+    # PHI2 after the negedge that latches A.
+    await ClockCycles(dut.i_clk, 5)
 
     # Handler executed both PHP and LDA #$99.
     assert_acc(dut, 0x99)
@@ -4471,10 +4608,49 @@ async def test_nmi_basic(dut):
     # Any later and BRK would fire instead of the NMI handler.
     dut.i_nmi_n.value = 0
 
-    # Exact cycle count after NMI assertion:
-    #   PLP remaining (3) + 7 for NMI entry + 3 for handler PHP
-    #   + 2 for LDA #$BB = 15 cycles to ACC=$BB visible.
-    await ClockCycles(dut.i_clk, 3 + 7 + 3 + 2)
+    # Wait 3 cycles (PLP remaining) to land at PHI2 of NMI entry cycle 1.
+    await ClockCycles(dut.i_clk, 3)
+
+    # The next 7 cycles are the NMI entry sequence (same shape as IRQ but
+    # with vector $FFFA/$FFFB). None are opcode fetches, so SYNC must be LOW
+    # on every one. Each cycle's address and RW direction is exactly specified:
+    #   cyc | addr   | rw | description
+    #   ----+--------+----+--------------------------
+    #    1  | $01FF  |  1 | dummy read on stack page
+    #    2  | $01FF  |  1 | dummy read on stack page
+    #    3  | $01FF  |  0 | push PCH
+    #    4  | $01FE  |  0 | push PCL
+    #    5  | $01FD  |  0 | push SR
+    #    6  | $FFFA  |  1 | read vector low
+    #    7  | $FFFB  |  1 | read vector high
+    nmi_entry_seq = [
+        (0x01FF, 1, "dummy read on stack"),
+        (0x01FF, 1, "dummy read on stack"),
+        (0x01FF, 0, "push PCH"),
+        (0x01FE, 0, "push PCL"),
+        (0x01FD, 0, "push SR"),
+        (0xFFFA, 1, "read vector lo"),
+        (0xFFFB, 1, "read vector hi"),
+    ]
+    for cyc, (exp_addr, exp_rw, label) in enumerate(nmi_entry_seq, start=1):
+        s = sample_bus(dut)
+        assert s.sync == 0, (
+            f"NMI cyc {cyc}/7 ({label}): SYNC must be 0, got 1 "
+            f"(addr={s.addr:#06x})")
+        assert s.addr == exp_addr, (
+            f"NMI cyc {cyc}/7 ({label}): expected addr={exp_addr:#06x}, "
+            f"got {s.addr:#06x}")
+        assert s.rw == exp_rw, (
+            f"NMI cyc {cyc}/7 ({label}): expected rw={exp_rw}, got {s.rw} "
+            f"(addr={s.addr:#06x})")
+        await RisingEdge(dut.i_clk)
+
+    # We've landed on the opcode fetch for PHP at $0600.
+    assert_opcode_fetch(dut, PHP)
+
+    # Run PHP (2 remaining cycles) + LDA #$BB (2 cycles) + 1 to land at a
+    # PHI2 after the negedge that latches A.
+    await ClockCycles(dut.i_clk, 5)
 
     # Handler executed both PHP and LDA #$BB.
     assert_acc(dut, 0xBB)
@@ -5079,6 +5255,176 @@ async def test_bcd_adc_upper_nibble_carry(dut):
     assert_flag(dut, SR_C, 1, "C")  # Carry set (result > 99)
 
 # ============================================================
+# SYNC Signal Tests
+# ============================================================
+# Verify that o_sync strictly complies with the MOS 6502 datasheet:
+#
+#   "This output line is provided to identify those cycles in which the
+#    microprocessor is doing an OP CODE fetch.  The SYNC line goes high
+#    during PHI1 of an OP CODE fetch and stays high for the remainder of
+#    that cycle."
+#
+# Properties exercised here:
+#   - SYNC is HIGH for exactly one bus cycle per real opcode fetch.
+#   - On a SYNC cycle the address bus presents the program counter (the
+#     byte being fetched is the opcode).
+#   - SYNC is LOW on every non-opcode-fetch cycle (operand fetches, ALU
+#     cycles, stack pushes/pulls, dummy reads, etc.).
+#   - When RDY is pulled low during a SYNC cycle, SYNC remains HIGH and
+#     the address bus remains stable until RDY is released.
+#
+# SYNC behavior during IRQ, NMI, and BRK entry sequences (vector fetches
+# all have SYNC=0; only the BRK opcode fetch and the handler opcode
+# fetch assert SYNC=1) is verified inline in test_irq_basic,
+# test_nmi_basic, and test_brk.
+#
+# Sampling convention (see sample_bus helper): all state updates in
+# cpu_6502 happen on negedge i_clk.  SYNC, address, and RW are valid for
+# the full bus cycle that follows each falling edge.  We sample at
+# RisingEdge (mid-cycle / start of PHI2) where everything has settled.
+
+@cocotb.test()
+async def test_sync_low_during_init(dut):
+    """SYNC stays LOW for every init cycle before the first opcode fetch.
+
+    On the real 6502 the reset sequence includes reads from the reset
+    vector at $FFFC/$FFFD; those reads are NOT opcode fetches and must
+    have SYNC=0.  This testbench uses START_PC_ENABLED=1 (which skips the
+    vector reads), so this test only verifies the weaker property that no
+    spurious SYNC=1 occurs during the fixed init delay.
+    """
+    await init_cpu(dut, [NOP])
+
+    # The first opcode fetch lands at PHI2 of cycle 8 after reset release.
+    # Cycles 1..7 are init and must all have SYNC=0.
+    for i in range(1, 8):
+        await RisingEdge(dut.i_clk)
+        s = sample_bus(dut)
+        assert s.sync == 0, (
+            f"Init cycle {i}: SYNC must be 0, got 1 (addr={s.addr:#06x})")
+
+    # Cycle 8: first opcode fetch.
+    await RisingEdge(dut.i_clk)
+    assert_opcode_fetch(dut, NOP, expected_addr=START_PC)
+
+@cocotb.test()
+async def test_sync_pattern_mixed_program(dut):
+    """Per-cycle SYNC/addr trace over a mixed program.
+
+    Covers in one pass:
+      - SYNC=1 on every opcode fetch (and only those cycles), across
+        2-cycle (LDA #imm, NOP) and 4-cycle (LDA abs) instructions.
+      - SYNC=0 on all operand fetches, ALU/dummy cycles, and data reads.
+      - One SYNC pulse per instruction (implicit in the expected list).
+    """
+    # $0400: LDA #$11           (2 cycles)
+    # $0402: LDA $0600          (4 cycles)
+    # $0405: NOP                (2 cycles)
+    # $0406: LDA #$22           (2 cycles)
+    # $0408: NOP                (2 cycles)
+    prog = [
+        LDA_IMM, 0x11,
+        LDA_ABS, 0x00, 0x06,
+        NOP,
+        LDA_IMM, 0x22,
+        NOP,
+    ]
+    # setup_and_run with cycles=0 lands at PHI2 of the first opcode fetch.
+    await setup_and_run(dut, prog, data={0x0600: 0x99}, cycles=0)
+
+    # (sync, addr, description) for every bus cycle from the first opcode
+    # fetch through the end of the program.
+    expected = [
+        (1, START_PC + 0, "LDA #$11 opcode"),
+        (0, START_PC + 1, "LDA #$11 operand"),
+        (1, START_PC + 2, "LDA $0600 opcode"),
+        (0, START_PC + 3, "LDA $0600 addr lo"),
+        (0, START_PC + 4, "LDA $0600 addr hi"),
+        (0, 0x0600,       "LDA $0600 data read"),
+        (1, START_PC + 5, "NOP opcode"),
+        (0, START_PC + 6, "NOP dummy read"),
+        (1, START_PC + 6, "LDA #$22 opcode"),
+        (0, START_PC + 7, "LDA #$22 operand"),
+        (1, START_PC + 8, "NOP opcode"),
+        (0, START_PC + 9, "NOP dummy read"),
+    ]
+
+    for cyc, (exp_sync, exp_addr, label) in enumerate(expected, start=1):
+        s = sample_bus(dut)
+        assert s.sync == exp_sync, (
+            f"Cycle {cyc} ({label}): expected sync={exp_sync}, got {s.sync} "
+            f"(addr={s.addr:#06x})")
+        assert s.addr == exp_addr, (
+            f"Cycle {cyc} ({label}): expected addr={exp_addr:#06x}, "
+            f"got {s.addr:#06x}")
+        await RisingEdge(dut.i_clk)
+
+@cocotb.test()
+async def test_sync_stays_high_when_rdy_pulled_low(dut):
+    """Datasheet: RDY low during a SYNC cycle stalls the CPU in its current state.
+
+    Pulling RDY low during an opcode-fetch cycle must, until RDY is
+    released:
+      - hold SYNC HIGH,
+      - hold the address bus on the opcode address,
+      - hold RW HIGH (the opcode fetch is a read).
+    Releasing RDY must drop SYNC on the very next bus cycle, and the
+    instruction must then complete normally and the next opcode fetch
+    must appear at the expected address.
+
+    (Register/PC freeze is covered by test_rdy_preserves_all_registers.)
+    """
+    prog = [
+        LDA_IMM, 0x55,  # $0400-$0401  (2 cycles)
+        NOP,            # $0402        (2 cycles) -- stall during fetch
+        LDA_IMM, 0x77,  # $0403-$0404  next opcode after release
+    ]
+
+    # cycles=0 lands at first opcode fetch (LDA #$55 at $0400).
+    await setup_and_run(dut, prog, cycles=0)
+
+    # Advance past LDA #$55 (2 cycles).
+    await RisingEdge(dut.i_clk)
+    await RisingEdge(dut.i_clk)
+
+    # Next cycle is the NOP opcode fetch with SYNC=1 at $0402.
+    s = assert_opcode_fetch(dut, NOP, expected_addr=START_PC + 2)
+    held_addr = s.addr
+
+    # Drop RDY mid-cycle (we are at PHI2). The next negedge i_clk samples
+    # RDY=0 and skips the entire state-update block, so SYNC/ADDR/RW must
+    # stay frozen for as long as RDY is held low.
+    dut.i_rdy.value = 0
+
+    STALL_CYCLES = 25
+    for cyc in range(STALL_CYCLES):
+        await RisingEdge(dut.i_clk)
+        s2 = sample_bus(dut)
+        assert s2.sync == 1, (
+            f"RDY-stall cycle {cyc}: SYNC dropped (expected HIGH)")
+        assert s2.addr == held_addr, (
+            f"RDY-stall cycle {cyc}: addr changed "
+            f"({held_addr:#06x} -> {s2.addr:#06x})")
+        assert s2.rw == 1, (
+            f"RDY-stall cycle {cyc}: RW changed (expected 1)")
+
+    # Release RDY mid-cycle. At the next negedge i_clk, RDY=1 is sampled and the
+    # state-update block fires: first_microinstruction clears, the opcode
+    # latches, and the bus advances. SYNC must therefore go LOW on the very next
+    # sampled cycle.
+    dut.i_rdy.value = 1
+    await RisingEdge(dut.i_clk)
+    s3 = sample_bus(dut)
+    assert s3.sync == 0, (
+        f"After RDY release, SYNC must drop on the very next cycle; "
+        f"got sync=1 (addr={s3.addr:#06x})")
+
+    # NOP is 2 cycles, so one more cycle completes it and the LDA #$77
+    # opcode fetch must appear at $0403 with SYNC=1.
+    await RisingEdge(dut.i_clk)
+    assert_opcode_fetch(dut, LDA_IMM, expected_addr=START_PC + 3)
+
+# ============================================================
 # RDY Signal Tests
 # ============================================================
 
@@ -5092,24 +5438,9 @@ async def test_rdy_pauses_cpu(dut):
         LDA_IMM, 0x44,      # A = $44
         NOP,
     ]
-    
-    Clock(dut.i_clk, 100, "ns").start()
-    dut.i_reset_n.value = 0
-    dut.i_rdy.value = 1
-    dut.i_nmi_n.value = 1
-    dut.i_irq_n.value = 1
-    
-    await ClockCycles(dut.i_clk, 2)
-    
-    for i, b in enumerate(prog):
-        dut.ram.mem[START_PC + i].value = b
-    
-    # Release reset and wait for init
-    dut.i_reset_n.value = 1
-    await ClockCycles(dut.i_clk, 8)
-    
-    # Run first instruction (LDA #$11) - 2 cycles
-    await ClockCycles(dut.i_clk, 2)
+
+    # cycles=2 executes first instruction (LDA #$11)
+    await setup_and_run(dut, prog, cycles=2)
     assert_acc(dut, 0x11)
     pc_after_first = get_pc(dut)
     
@@ -5134,22 +5465,62 @@ async def test_rdy_pauses_cpu(dut):
     await ClockCycles(dut.i_clk, 2)
     assert_acc(dut, 0x33)
 
-async def wait_for_sync(dut, timeout=100):
-    """Wait for o_sync to go high (opcode fetch cycle)."""
+async def wait_for_next_instruction(dut, timeout=100):
+    """Advance the clock past the current instruction to the opcode fetch cycle
+    of the next instruction.
+
+    Use wait_for_opcode_fetch() when you need to lock onto the current opcode
+    fetch if SYNC is already high.
+
+    Raises AssertionError if opcode fetch cycle not detected within `timeout`
+    rising edges.
+    """
     for _ in range(timeout):
-        await RisingEdge(dut.i_clk)
+        # Always advances the clock at least once, so it skips any currently-active
+        # opcode-fetch cycle.
+        await RisingEdge(dut.i_clk)        
         if int(dut.cpu_6502.o_sync.value) == 1:
-            return True
-    return False
+            return
+    assert False, f"Timed out waiting for next opcode fetch (SYNC=1) after {timeout} rising edges"
+
+async def wait_for_opcode_fetch(dut, timeout=100):
+    """Advance the clock to the next opcode fetch cycle. Returns immediately
+    if already at an opcode fetch cycle. Use wait_for_next_instruction() to
+    advance to the opcode_fetch cycle of the following instruction.
+
+    Raises AssertionError if opcode fetch cycle not detected within `timeout`
+    rising edges (`timeout` defaults to 100 cycles).
+    """
+    # If already in an opcode fetch cycle, returns without advancing the clock
+    if int(dut.cpu_6502.o_sync.value) == 1:
+        return
+    
+    # Otherwise, advance the clock until an opcode fetch cycle is found.
+    await wait_for_next_instruction(dut, timeout)
 
 async def single_step(dut):
-    """Execute one instruction by resuming until next SYNC."""
+    """Step the CPU forward by exactly one instruction.
+
+    Sets RDY=1, waits for the next opcode-fetch cycle of the FOLLOWING
+    instruction, then re-pauses with RDY=0. The stepped instruction has fully
+    committed by the time this returns.
+
+    Works regardless of whether RDY is currently high or low.
+    
+    Postcondition: CPU paused at the NEXT instruction's opcode-fetch cycle.
+    """
+    # Resume the CPU to let it advance to the next instruction. 
     dut.i_rdy.value = 1
-    # Wait for next SYNC (marks start of next instruction = end of current)
-    await wait_for_sync(dut)
-    # Pause immediately
+
+    # Advance past current instruction to opcode-fetch of next instruction.
+    await wait_for_next_instruction(dut)
+
+    # Deassert RDY before the new opcode latches.
     dut.i_rdy.value = 0
-    await ClockCycles(dut.i_clk, 1)
+
+    # Postcondition: CPU paused at the NEXT instruction's opcode-fetch cycle.
+    assert int(dut.cpu_6502.o_sync.value) == 1, (
+        "single_step postcondition violated: SYNC must be 1 on return")
 
 @cocotb.test()
 async def test_rdy_single_step(dut):
@@ -5162,23 +5533,11 @@ async def test_rdy_single_step(dut):
         NOP,
     ]
 
-    Clock(dut.i_clk, 100, "ns").start()
-    dut.i_reset_n.value = 0
-    dut.i_rdy.value = 1  # RDY must be high during reset/init
-    dut.i_nmi_n.value = 1
-    dut.i_irq_n.value = 1
+    # cycles=0 lands at first opcode fetch (LDA #$AA).
+    await setup_and_run(dut, prog, cycles=0)
+    assert_opcode_fetch(dut, LDA_IMM, expected_addr=START_PC)
 
-    await ClockCycles(dut.i_clk, 2)
-
-    for i, b in enumerate(prog):
-        dut.ram.mem[START_PC + i].value = b
-
-    # Release reset and wait for init to complete
-    dut.i_reset_n.value = 1
-    await ClockCycles(dut.i_clk, 8)
-
-    # Wait for first SYNC (start of LDA), then pause
-    await wait_for_sync(dut)
+    # Pause and verify the CPU stays frozen for several clocks.
     dut.i_rdy.value = 0
     await ClockCycles(dut.i_clk, 5)  # verify CPU stays paused
 
@@ -5206,23 +5565,13 @@ async def test_rdy_mid_instruction(dut):
         NOP,
     ]
 
-    Clock(dut.i_clk, 100, "ns").start()
-    dut.i_reset_n.value = 0
-    dut.i_rdy.value = 1
-    dut.i_nmi_n.value = 1
-    dut.i_irq_n.value = 1
+    # cycles=0 lands at first opcode fetch (LDA $0600).
+    await setup_and_run(dut, prog, data={0x0600: 0xBE}, cycles=0)
+    assert_opcode_fetch(dut, LDA_ABS, expected_addr=START_PC)
 
-    await ClockCycles(dut.i_clk, 2)
-
-    for i, b in enumerate(prog):
-        dut.ram.mem[START_PC + i].value = b
-    dut.ram.mem[0x0600].value = 0xBE
-
-    dut.i_reset_n.value = 1
-    await ClockCycles(dut.i_clk, 8)
-
-    # Wait for sync (opcode fetch = cycle 1 of 4 for LDA absolute)
-    await wait_for_sync(dut)
+    # Advance past the opcode fetch so the CPU is mid-LDA (opcode latched, 3
+    # cycles still to go).
+    await ClockCycles(dut.i_clk, 1)
     pc_before = get_pc(dut)
 
     # Pause after opcode fetch (mid-instruction)
@@ -5289,23 +5638,8 @@ async def test_rdy_during_store(dut):
         NOP,
     ]
 
-    Clock(dut.i_clk, 100, "ns").start()
-    dut.i_reset_n.value = 0
-    dut.i_rdy.value = 1
-    dut.i_nmi_n.value = 1
-    dut.i_irq_n.value = 1
-
-    await ClockCycles(dut.i_clk, 2)
-
-    for i, b in enumerate(prog):
-        dut.ram.mem[START_PC + i].value = b
-    dut.ram.mem[0x0700].value = 0x00
-
-    dut.i_reset_n.value = 1
-    await ClockCycles(dut.i_clk, 8)
-
-    # Execute LDA #$CD (2 cycles)
-    await ClockCycles(dut.i_clk, 2)
+    # cycles=2 executes first instruction (LDA #$CD)
+    await setup_and_run(dut, prog, data={0x0700: 0x00}, cycles=2)
     assert_acc(dut, 0xCD)
 
     # Start STA, run 1 cycle, then pause
@@ -5332,29 +5666,14 @@ async def test_rdy_during_jsr_rts(dut):
         LDA_IMM, 0x33,         # A = $33 (return here)
         NOP,
     ]
-    sub = [
-        LDA_IMM, 0x22,         # A = $22
-        RTS_IMP,               # RTS (6 cycles)
-    ]
+    data = {
+        0x0500: LDA_IMM,       # subroutine: A = $22
+        0x0501: 0x22,
+        0x0502: RTS_IMP,       # RTS (6 cycles)
+    }
 
-    Clock(dut.i_clk, 100, "ns").start()
-    dut.i_reset_n.value = 0
-    dut.i_rdy.value = 1
-    dut.i_nmi_n.value = 1
-    dut.i_irq_n.value = 1
-
-    await ClockCycles(dut.i_clk, 2)
-
-    for i, b in enumerate(prog):
-        dut.ram.mem[START_PC + i].value = b
-    for i, b in enumerate(sub):
-        dut.ram.mem[0x0500 + i].value = b
-
-    dut.i_reset_n.value = 1
-    await ClockCycles(dut.i_clk, 8)
-
-    # Execute LDA #$11
-    await ClockCycles(dut.i_clk, 2)
+    # cycles=2 executes first instruction (LDA #$11)
+    await setup_and_run(dut, prog, data=data, cycles=2)
     assert_acc(dut, 0x11)
 
     # Start JSR, run 2 cycles into it, then pause
@@ -5378,7 +5697,12 @@ async def test_rdy_during_jsr_rts(dut):
 
 @cocotb.test()
 async def test_rdy_during_push_pull(dut):
-    """Pause during PHA (3 cycles) and PLA (4 cycles)."""
+    """Pause during PHA (3 cycles) and PLA (4 cycles).
+
+    Drives the CPU one instruction at a time via single_step and verifies
+    that pausing for many cycles in the middle of the PHA/PLA opcode-fetch
+    cycle does not corrupt the result.
+    """
     prog = [
         LDA_IMM, 0xAB,        # A = $AB  (2 cycles)
         PHA,                   # push A   (3 cycles)
@@ -5387,46 +5711,40 @@ async def test_rdy_during_push_pull(dut):
         NOP,
     ]
 
-    Clock(dut.i_clk, 100, "ns").start()
-    dut.i_reset_n.value = 0
-    dut.i_rdy.value = 1
-    dut.i_nmi_n.value = 1
-    dut.i_irq_n.value = 1
+    # cycles=0 lands at first opcode fetch (LDA #$AB).
+    await setup_and_run(dut, prog, cycles=0)
+    assert_opcode_fetch(dut, LDA_IMM, expected_addr=START_PC)
 
-    await ClockCycles(dut.i_clk, 2)
-
-    for i, b in enumerate(prog):
-        dut.ram.mem[START_PC + i].value = b
-
-    dut.i_reset_n.value = 1
-    await ClockCycles(dut.i_clk, 8)
-
-    # Sync for LDA #$AB, complete it (1 remaining cycle)
-    await wait_for_sync(dut)
-    await ClockCycles(dut.i_clk, 1)
+    # Step through LDA #$AB (lands paused at PHA opcode fetch).
+    await single_step(dut)
+    assert_opcode_fetch(dut, PHA, expected_addr=START_PC + 2)
     assert_acc(dut, 0xAB)
 
-    # Sync for PHA (opcode fetch = cycle 1 of 3)
-    await wait_for_sync(dut)
-    dut.i_rdy.value = 0
+    # Hold the pause across the PHA opcode-fetch cycle for 15 cycles to
+    # verify the CPU stays frozen.
     await ClockCycles(dut.i_clk, 15)
-    dut.i_rdy.value = 1
-    # 2 remaining cycles for PHA
-    await ClockCycles(dut.i_clk, 2)
+    assert_opcode_fetch(dut, PHA, expected_addr=START_PC + 2)
+    assert_acc(dut, 0xAB)
 
-    # Sync for LDA #$00, complete it (1 remaining cycle)
-    await wait_for_sync(dut)
-    await ClockCycles(dut.i_clk, 1)
+    # Step through PHA (lands paused at LDA #$00 opcode fetch, A preserved).
+    await single_step(dut)
+    assert_opcode_fetch(dut, LDA_IMM, expected_addr=START_PC + 3)
+    assert_acc(dut, 0xAB)
+
+    # Step through LDA #$00 (lands paused at PLA opcode fetch).
+    await single_step(dut)
+    assert_opcode_fetch(dut, PLA, expected_addr=START_PC + 5)
     assert_acc(dut, 0x00)
 
-    # Sync for PLA (opcode fetch = cycle 1 of 4)
-    await wait_for_sync(dut)
-    dut.i_rdy.value = 0
+    # Hold the pause across the PLA opcode-fetch cycle for 15 cycles to
+    # verify the CPU stays frozen.
     await ClockCycles(dut.i_clk, 15)
-    dut.i_rdy.value = 1
-    # 3 remaining cycles for PLA
-    await ClockCycles(dut.i_clk, 3)
+    assert_opcode_fetch(dut, PLA, expected_addr=START_PC + 5)
+    assert_acc(dut, 0x00)
 
+    # Step through PLA (lands paused at NOP opcode fetch, A pulled back to $AB).
+    await single_step(dut)
+    assert_opcode_fetch(dut, NOP, expected_addr=START_PC + 6)
     assert_acc(dut, 0xAB)
 
 @cocotb.test()
@@ -5440,22 +5758,8 @@ async def test_rdy_during_taken_branch(dut):
         NOP,
     ]
 
-    Clock(dut.i_clk, 100, "ns").start()
-    dut.i_reset_n.value = 0
-    dut.i_rdy.value = 1
-    dut.i_nmi_n.value = 1
-    dut.i_irq_n.value = 1
-
-    await ClockCycles(dut.i_clk, 2)
-
-    for i, b in enumerate(prog):
-        dut.ram.mem[START_PC + i].value = b
-
-    dut.i_reset_n.value = 1
-    await ClockCycles(dut.i_clk, 8)
-
-    # LDA #$00 (2 cycles)
-    await ClockCycles(dut.i_clk, 2)
+    # cycles=2 executes first instruction (LDA #$00)
+    await setup_and_run(dut, prog, cycles=2)
 
     # Start BEQ, pause 1 cycle in
     await ClockCycles(dut.i_clk, 1)
@@ -5476,23 +5780,8 @@ async def test_rdy_during_rmw(dut):
         NOP,
     ]
 
-    Clock(dut.i_clk, 100, "ns").start()
-    dut.i_reset_n.value = 0
-    dut.i_rdy.value = 1
-    dut.i_nmi_n.value = 1
-    dut.i_irq_n.value = 1
-
-    await ClockCycles(dut.i_clk, 2)
-
-    for i, b in enumerate(prog):
-        dut.ram.mem[START_PC + i].value = b
-    dut.ram.mem[0x10].value = 0x40
-
-    dut.i_reset_n.value = 1
-    await ClockCycles(dut.i_clk, 8)
-
     # Start first INC, pause 2 cycles in (during read-modify-write sequence)
-    await ClockCycles(dut.i_clk, 2)
+    await setup_and_run(dut, prog, zp_data={0x10: 0x40}, cycles=2)
     dut.i_rdy.value = 0
     await ClockCycles(dut.i_clk, 20)
     dut.i_rdy.value = 1
@@ -5514,19 +5803,8 @@ async def test_rdy_rapid_toggle(dut):
         JMP_ABS, 0x06, 0x04,  # spin forever at $0406 (self-loop)
     ]
 
-    Clock(dut.i_clk, 100, "ns").start()
-    dut.i_reset_n.value = 0
-    dut.i_rdy.value = 1
-    dut.i_nmi_n.value = 1
-    dut.i_irq_n.value = 1
-
-    await ClockCycles(dut.i_clk, 2)
-
-    for i, b in enumerate(prog):
-        dut.ram.mem[START_PC + i].value = b
-
-    dut.i_reset_n.value = 1
-    await ClockCycles(dut.i_clk, 8)
+    # cycles=0 lands at first opcode fetch (LDA #$10).
+    await setup_and_run(dut, prog, cycles=0)
 
     # Toggle RDY every cycle for 50 cycles
     # (enough for all instructions even at half speed)
@@ -5551,28 +5829,12 @@ async def test_rdy_during_indirect_indexed(dut):
         LDA_IZY, 0x20,            # LDA ($20),Y — reads pointer from $20/$21,
         NOP,                      #   adds Y, loads from effective address
     ]
+    # Pointer at $20/$21 → $0600; data at $0604 (base $0600 + Y=$04)
+    zp_data = {0x20: 0x00, 0x21: 0x06}
+    data = {0x0604: 0x77}
 
-    Clock(dut.i_clk, 100, "ns").start()
-    dut.i_reset_n.value = 0
-    dut.i_rdy.value = 1
-    dut.i_nmi_n.value = 1
-    dut.i_irq_n.value = 1
-
-    await ClockCycles(dut.i_clk, 2)
-
-    for i, b in enumerate(prog):
-        dut.ram.mem[START_PC + i].value = b
-    # Pointer at $20/$21 → $0600
-    dut.ram.mem[0x20].value = 0x00
-    dut.ram.mem[0x21].value = 0x06
-    # Data at $0604 (base $0600 + Y=$04)
-    dut.ram.mem[0x0604].value = 0x77
-
-    dut.i_reset_n.value = 1
-    await ClockCycles(dut.i_clk, 8)
-
-    # LDY #$04 (2 cycles)
-    await ClockCycles(dut.i_clk, 2)
+    # cycles=2 executes first instruction (LDA $04).
+    await setup_and_run(dut, prog, zp_data=zp_data, data=data, cycles=2)
 
     # Start LDA (ind),Y — pause 2 cycles in (during pointer fetch)
     await ClockCycles(dut.i_clk, 2)

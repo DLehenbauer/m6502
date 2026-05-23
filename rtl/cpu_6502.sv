@@ -15,7 +15,7 @@ module cpu_6502 #(
     input i_irq_n,
     input i_so_n,
 
-    output reg o_sync,
+    output o_sync,
 
     // bus
     input [7:0] i_bus_data,
@@ -81,6 +81,20 @@ operand_type_t addressing_mode;
 reg handle_irq, handle_nmi;
 
 reg first_microinstruction;
+
+// `o_sync` must be valid shortly after the negedge of i_clk to provide adequate
+// setup time for `i_rdy` before the next rising edge.
+//
+//              v-- i_rdy: valid before phi2 (setup target)
+//  ___         :  ____
+//     \__________/
+//       :
+//       ^-- o_bus_addr, o_rw, o_sync valid after phi1
+//
+// Driving o_sync combinationally from first_microinstruction (which is set on
+// the negedge i_clk that starts each opcode-fetch cycle) meets this timing.
+assign o_sync = first_microinstruction && !handle_irq && !handle_nmi;
+
 microinstruction_t current_microinstruction, prev_mi;
 reg [7:0] current_instruction;
 always_comb begin
@@ -171,7 +185,6 @@ always @(negedge i_clk or negedge i_reset_n) begin
     if (!i_reset_n) begin
         first_microinstruction <= 0;
         o_rw <= 1;
-        o_sync <= 0;
         operation <= INIT;
         init_counter <= 0;
         program_counter <= 0;
@@ -197,7 +210,6 @@ always @(negedge i_clk or negedge i_reset_n) begin
             first_microinstruction <= 0;
             prev_mi <= active_microinstruction;
             o_rw <= 0;
-            o_sync <= 0;
 
             if (handle_irq || handle_nmi) begin
                 if (active_microinstruction == WRITE_SR)
@@ -260,7 +272,6 @@ always @(negedge i_clk or negedge i_reset_n) begin
                     opcode <= current_instruction;
                     program_counter <= program_counter + 1;
                     o_bus_addr <= program_counter + 1;
-                    o_sync <= 1;
                 end
             end
 

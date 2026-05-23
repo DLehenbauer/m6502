@@ -15,7 +15,7 @@ module cpu_6502 import cpu_6502_pkg::*; #(
     input i_irq_n,
     input i_so_n,
 
-    output reg o_sync,
+    output o_sync,
 
     // bus
     input [7:0] i_bus_data,
@@ -81,6 +81,23 @@ operand_type_t addressing_mode;
 reg handle_irq, handle_nmi;
 
 reg first_microinstruction;
+
+// In a real 6502, o_sync is asserted shortly after the negedge of i_clk, which
+// allows adequate setup time before the i_rdy signal is sampled after the
+// rising edge of i_clk.
+//
+//                v-- i_rdy must be stable by this point
+//  ___           :____
+//     \__________/
+//       :
+//       ^-- o_sync must be valid shortly after negedge
+//
+// Driving o_sync combinationally from first_microinstruction (which is set on
+// the negedge i_clk that starts each opcode-fetch cycle) meets this timing. We
+// require combinational logic here because we need the post-edge values of
+// handle_irq/handle_nmi.
+assign o_sync = first_microinstruction && !handle_irq && !handle_nmi;
+
 microinstruction_t current_microinstruction, prev_mi;
 reg [7:0] current_instruction;
 always_comb begin
@@ -171,7 +188,6 @@ always @(negedge i_clk or negedge i_reset_n) begin
     if (!i_reset_n) begin
         first_microinstruction <= 0;
         o_rw <= 1;
-        o_sync <= 0;
         operation <= INIT;
         init_counter <= 0;
         program_counter <= 0;
@@ -201,7 +217,6 @@ always @(negedge i_clk or negedge i_reset_n) begin
             first_microinstruction <= 0;
             prev_mi <= active_microinstruction;
             o_rw <= 0;
-            o_sync <= 0;
 
             if (handle_irq || handle_nmi) begin
                 if (active_microinstruction == WRITE_SR)
@@ -264,7 +279,6 @@ always @(negedge i_clk or negedge i_reset_n) begin
                     opcode <= current_instruction;
                     program_counter <= program_counter + 1;
                     o_bus_addr <= program_counter + 1;
-                    o_sync <= 1;
                 end
             end
 

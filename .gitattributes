@@ -1,0 +1,2 @@
+# Do not apply EOL conversion to 6502 ROM/test images
+*.bin binary

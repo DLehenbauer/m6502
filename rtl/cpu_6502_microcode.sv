@@ -2,7 +2,7 @@
 
 // Highly vertical microcode to save space. If the Microcode ROM was external it'd be better
 // to make it more horizontal, but for space savings this is chosen for now.
-module cpu_6502_microcode (
+module cpu_6502_microcode import cpu_6502_pkg::*; (
     input [7:0] i_current_instruction,
     input i_init,
     input i_handle_irq,

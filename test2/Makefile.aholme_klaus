@@ -1,0 +1,51 @@
+# Makefile for the aholme transistor-level 6502 core running Klaus
+# Dormann's functional / decimal / interrupt tests under Verilator.
+#
+# Usage:
+#   make -f Makefile.aholme_klaus run
+#   make -f Makefile.aholme_klaus run WAVES=1   # generate trace.vcd
+#   make -f Makefile.aholme_klaus clean
+
+VERILATOR = verilator
+TOP       = chip_6502
+BUILD_DIR = obj_dir_aholme_klaus
+CORE_DIR  = aholme
+
+# The Klaus binaries are shared with the existing test/ tree; we don't
+# duplicate them here.
+BIN_DIR   = ../test
+
+VERILOG_SOURCES = \
+	$(CORE_DIR)/chip_6502.v \
+	$(CORE_DIR)/MUX.v
+
+VFLAGS = --cc --exe --build \
+	-Wno-fatal \
+	-I$(CORE_DIR) \
+	--Mdir $(BUILD_DIR) \
+	--top-module $(TOP) \
+	-O3 \
+	-CFLAGS "-O3"
+
+ifeq ($(WAVES),1)
+VFLAGS += --trace
+endif
+
+.PHONY: all build run clean
+
+all: run
+
+build: $(BUILD_DIR)/V$(TOP)
+
+$(BUILD_DIR)/V$(TOP): $(VERILOG_SOURCES) tb_chip_6502_klaus.cpp
+	$(VERILATOR) $(VFLAGS) $(VERILOG_SOURCES) tb_chip_6502_klaus.cpp
+
+run: build
+	@echo "Running Klaus 6502 tests on aholme transistor-level core..."
+	@cp $(BIN_DIR)/6502_functional_test.bin $(BUILD_DIR)/
+	@cp $(BIN_DIR)/6502_interrupt_test.bin  $(BUILD_DIR)/
+	@cp $(BIN_DIR)/6502_decimal_test.bin    $(BUILD_DIR)/
+	cd $(BUILD_DIR) && ./V$(TOP)
+
+clean:
+	rm -rf $(BUILD_DIR)

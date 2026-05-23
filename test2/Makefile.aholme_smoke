@@ -1,0 +1,36 @@
+# Smoke-test build for the aholme transistor-level 6502 core.
+# Quick sanity check before running the much-longer Klaus suite.
+#
+# Usage:  make -f Makefile.aholme_smoke run
+
+VERILATOR = verilator
+TOP       = chip_6502
+BUILD_DIR = obj_dir_aholme_smoke
+CORE_DIR  = aholme
+
+VERILOG_SOURCES = \
+	$(CORE_DIR)/chip_6502.v \
+	$(CORE_DIR)/MUX.v
+
+VFLAGS = --cc --exe --build \
+	-Wno-fatal \
+	-I$(CORE_DIR) \
+	--Mdir $(BUILD_DIR) \
+	--top-module $(TOP) \
+	-O3 \
+	-CFLAGS "-O3"
+
+.PHONY: all build run clean
+
+all: run
+
+build: $(BUILD_DIR)/V$(TOP)
+
+$(BUILD_DIR)/V$(TOP): $(VERILOG_SOURCES) tb_smoke.cpp
+	$(VERILATOR) $(VFLAGS) $(VERILOG_SOURCES) tb_smoke.cpp
+
+run: build
+	cd $(BUILD_DIR) && ./V$(TOP)
+
+clean:
+	rm -rf $(BUILD_DIR)

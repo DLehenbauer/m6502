@@ -29,3 +29,7 @@ results.xml
 !test/6502_functional_test.bin
 !test/6502_interrupt_test.bin
 !test/6502_decimal_test.bin
+
+# test2/ (aholme reference core) Verilator build outputs
+test2/obj_dir*
+test2/trace.vcd

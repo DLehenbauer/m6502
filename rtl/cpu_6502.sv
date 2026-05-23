@@ -82,17 +82,20 @@ reg handle_irq, handle_nmi;
 
 reg first_microinstruction;
 
-// `o_sync` must be valid shortly after the negedge of i_clk to provide adequate
-// setup time for `i_rdy` before the next rising edge.
+// In a real 6502, o_sync is asserted shortly after the negedge of i_clk, which
+// allows adequate setup time before the i_rdy signal is sampled after the
+// rising edge of i_clk.
 //
-//              v-- i_rdy: valid before phi2 (setup target)
-//  ___         :  ____
+//                v-- i_rdy must be stable by this point
+//  ___           :____
 //     \__________/
 //       :
-//       ^-- o_bus_addr, o_rw, o_sync valid after phi1
+//       ^-- o_sync must be valid shortly after negedge
 //
 // Driving o_sync combinationally from first_microinstruction (which is set on
-// the negedge i_clk that starts each opcode-fetch cycle) meets this timing.
+// the negedge i_clk that starts each opcode-fetch cycle) meets this timing. We
+// require combinational logic here because we need the post-edge values of
+// handle_irq/handle_nmi.
 assign o_sync = first_microinstruction && !handle_irq && !handle_nmi;
 
 microinstruction_t current_microinstruction, prev_mi;

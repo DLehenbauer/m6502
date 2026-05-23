@@ -24,3 +24,8 @@ results.xml
 *.bin
 *.hex
 *.elf
+
+# Keep 6502 test programs
+!test/6502_functional_test.bin
+!test/6502_interrupt_test.bin
+!test/6502_decimal_test.bin

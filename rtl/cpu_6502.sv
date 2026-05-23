@@ -1,6 +1,6 @@
 `include "cpu_6502_instructions.vh"
 
-module cpu_6502 #(
+module cpu_6502 import cpu_6502_pkg::*; #(
     START_PC_ENABLED = 0,
     START_PC = 0
 ) (
@@ -15,7 +15,7 @@ module cpu_6502 #(
     input i_irq_n,
     input i_so_n,
 
-    output reg o_sync,
+    output o_sync,
 
     // bus
     input [7:0] i_bus_data,
@@ -81,6 +81,23 @@ operand_type_t addressing_mode;
 reg handle_irq, handle_nmi;
 
 reg first_microinstruction;
+
+// In a real 6502, o_sync is asserted shortly after the negedge of i_clk, which
+// allows adequate setup time before the i_rdy signal is sampled after the
+// rising edge of i_clk.
+//
+//                v-- i_rdy must be stable by this point
+//  ___           :____
+//     \__________/
+//       :
+//       ^-- o_sync must be valid shortly after negedge
+//
+// Driving o_sync combinationally from first_microinstruction (which is set on
+// the negedge i_clk that starts each opcode-fetch cycle) meets this timing. We
+// require combinational logic here because we need the post-edge values of
+// handle_irq/handle_nmi.
+assign o_sync = first_microinstruction && !handle_irq && !handle_nmi;
+
 microinstruction_t current_microinstruction, prev_mi;
 reg [7:0] current_instruction;
 always_comb begin
@@ -171,7 +188,6 @@ always @(negedge i_clk or negedge i_reset_n) begin
     if (!i_reset_n) begin
         first_microinstruction <= 0;
         o_rw <= 1;
-        o_sync <= 0;
         operation <= INIT;
         init_counter <= 0;
         program_counter <= 0;
@@ -187,6 +203,10 @@ always @(negedge i_clk or negedge i_reset_n) begin
         init <= 0;
         prev_nmi_n <= 1;
         pending_nmi <= 0;
+
+        // Initialize `opcode` to NOP so the vector-load MICRO_EXECUTE at the end
+        // of the init sequence preserves the just-reset flags and registers.
+        opcode <= OPCODE_NOP;
     end
     else begin
         prev_nmi_n <= nmi_n_sync2;
@@ -197,11 +217,11 @@ always @(negedge i_clk or negedge i_reset_n) begin
             first_microinstruction <= 0;
             prev_mi <= active_microinstruction;
             o_rw <= 0;
-            o_sync <= 0;
 
             if (handle_irq || handle_nmi) begin
                 if (active_microinstruction == WRITE_SR)
-                    bus_data_write <= {status_negative, status_overflow, 1'b1, 1'b1, status_decimal,
+                    // Push SR with B=0 (bit 4 clear) to indicate hardware source (IRQ/NMI).
+                    bus_data_write <= {status_negative, status_overflow, /* U: */ 1'b1, /* B: */ 1'b0, status_decimal,
                                         status_interrupt, status_zero, status_carry};
                 else
                     bus_data_write <= active_microinstruction == PUSH_PCL ? program_counter[7:0] : program_counter[15:8];
@@ -209,13 +229,17 @@ always @(negedge i_clk or negedge i_reset_n) begin
             else begin
                 priority casez (opcode)
                 OPCODE_TYPE_STA, OPCODE_PHA: bus_data_write <= register_acc;
-                OPCODE_PHP: bus_data_write <= {status_negative, status_overflow, 1'b1, 1'b1, status_decimal,
-                                status_interrupt, status_zero, status_carry};
+                OPCODE_PHP: begin
+                    // Push SR with B=1 (bit 4 set) to indicate software source (PHP).
+                    bus_data_write <= {status_negative, status_overflow, /* U: */ 1'b1, /* B: */ 1'b1, status_decimal,
+                                        status_interrupt, status_zero, status_carry};
+                end
                 OPCODE_TYPE_STX: bus_data_write <= register_x;
                 OPCODE_TYPE_STY: bus_data_write <= register_y;
                 OPCODE_BRK: begin
                     if (active_microinstruction == WRITE_SR)
-                        bus_data_write <= {status_negative, status_overflow, 1'b1, 1'b1, status_decimal,
+                        // Push SR with B=1 (bit 4 set) to indicate software source (BRK).
+                        bus_data_write <= {status_negative, status_overflow, /* U: */ 1'b1, /* B: */ 1'b1, status_decimal,
                                             status_interrupt, status_zero, status_carry};
                     else
                         bus_data_write <= active_microinstruction == PUSH_PCH ? program_counter[15:8] : program_counter[7:0];
@@ -245,15 +269,16 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 init <= 0;
             end
 
-            // opcode fetch
             if (first_microinstruction) begin
-                opcode <= current_instruction;
-
-                // Ensure we advance forward always for first instruction
-                if (!handle_irq && !handle_nmi) begin
+                if (handle_irq || handle_nmi) begin
+                    // Set `opcode` to NOP so the vector-load MICRO_EXECUTE at the end of the interrupt
+                    // entry sequence preserves the interrupted instruction's flags and registers.
+                    opcode <= OPCODE_NOP;
+                end else begin
+                    // Normal instruction sequence: latch the opcode from the bus and increment PC.
+                    opcode <= current_instruction;
                     program_counter <= program_counter + 1;
                     o_bus_addr <= program_counter + 1;
-                    o_sync <= 1;
                 end
             end
 

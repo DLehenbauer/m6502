@@ -9,11 +9,13 @@ RTL_DIR = ../rtl
 TEST_DIR = .
 BIN_DIR = .
 
-# All RTL sources - .vh files FIRST so they're processed before .sv files
+# Verilator parses files in the order given and requires packages to be
+# declared before any module whose port list references their types.
+RTL_PKG_SOURCES = $(wildcard $(RTL_DIR)/*_pkg.sv)
 VERILOG_SOURCES = \
-	$(shell find $(RTL_DIR) -name '*.vh') \
 	$(TEST_DIR)/test_mcu_klaus.sv \
-	$(wildcard $(RTL_DIR)/*.sv)
+	$(RTL_PKG_SOURCES) \
+	$(filter-out $(RTL_PKG_SOURCES), $(wildcard $(RTL_DIR)/*.sv))
 
 # Verilator flags
 VFLAGS = --cc --exe --build \
@@ -39,8 +41,10 @@ $(BUILD_DIR)/V$(TOP): $(VERILOG_SOURCES) tb_mcu_klaus.cpp
 	$(VERILATOR) $(VFLAGS) $(VERILOG_SOURCES) tb_mcu_klaus.cpp
 
 run: build
-	@echo "Running Klaus 6502 functional test (MCU with BRAM)..."
-	@cp $(BIN_DIR)/6502_functional_test.hex $(BUILD_DIR)/
+	@echo "Running Klaus 6502 tests (MCU with BRAM)..."
+	@cp $(BIN_DIR)/6502_functional_test.bin $(BUILD_DIR)/
+	@cp $(BIN_DIR)/6502_interrupt_test.bin  $(BUILD_DIR)/
+	@cp $(BIN_DIR)/6502_decimal_test.bin    $(BUILD_DIR)/
 	cd $(BUILD_DIR) && ./V$(TOP)
 
 clean:

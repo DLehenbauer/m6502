@@ -33,3 +33,6 @@ results.xml
 # test2/ (aholme reference core) Verilator build outputs
 test2/obj_dir*
 test2/trace.vcd
+
+# test3/ (half-cycle-accurate test framework) Verilator build outputs
+test3/build

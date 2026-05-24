@@ -1,4 +1,4 @@
-.PHONY: test test-klaus test-klaus-aholme test-klaus-aholme-smoke clean-test
+.PHONY: test test-klaus test-klaus-aholme test-klaus-aholme-smoke test-test3 clean-test
 
 test:
 	uv run pytest test/test_runner.py -s -x
@@ -21,8 +21,14 @@ test-klaus-aholme:
 test-klaus-aholme-smoke:
 	cd test2 && make -f Makefile.aholme_smoke run
 
+# Half-cycle-accurate Verilator test framework (test3/). Phase 1: runs
+# the one smoke test against the aholme transistor-level core.
+test-test3:
+	cd test3 && make run
+
 clean-test:
 	cd test  && make -f Makefile.mcu_klaus    clean
 	cd test2 && make -f Makefile.aholme_klaus clean
 	cd test2 && make -f Makefile.aholme_smoke clean
+	cd test3 && make                          clean
 	rm -rf sim_build

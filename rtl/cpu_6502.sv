@@ -69,6 +69,7 @@ reg [7:0] opcode;
 reg [2:0] init_counter;
 reg [7:0] bus_data_write;
 reg [7:0] rmw_new;
+reg [1:0] jam_count;
 
 alu_op_t alu_operation;
 reg [7:0] alu_result, alu_lhs, alu_rhs;
@@ -203,6 +204,7 @@ always @(negedge i_clk or negedge i_reset_n) begin
         handle_irq <= 0;
         handle_nmi <= 0;
         init <= 0;
+        jam_count <= 0;
         prev_nmi_n <= 1;
         pending_nmi <= 0;
 
@@ -304,6 +306,21 @@ always @(negedge i_clk or negedge i_reset_n) begin
                         current_microinstruction <= READ_VECTOR_HI;
                         init <= 1;
                     end
+                end
+            end
+            else if (active_microinstruction == JAM) begin
+                // JAM/KIL dead state. The collapsed opcode-fetch cycle (handled
+                // by the first_microinstruction block) leaves the operand read
+                // at PC+1 on the bus. From the first real JAM cycle onward the
+                // PC freezes and the address bus walks the NMOS dead pattern:
+                // FFFF, then FFFE twice, then FFFF forever. SYNC never asserts
+                // because first_microinstruction stays low here.
+                current_microinstruction <= JAM;
+                if (current_microinstruction == JAM) begin
+                    program_counter <= program_counter;
+                    o_bus_addr <= (jam_count == 2'd1 || jam_count == 2'd2)
+                        ? 16'hFFFE : 16'hFFFF;
+                    if (jam_count != 2'd3) jam_count <= jam_count + 2'd1;
                 end
             end
             else if (active_microinstruction == NOP) begin

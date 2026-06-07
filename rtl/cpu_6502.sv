@@ -806,6 +806,9 @@ always @(negedge i_clk or negedge i_reset_n) begin
                     OPCODE_ASL_ACC, OPCODE_LSR_ACC, OPCODE_ROL_ACC, OPCODE_ROR_ACC: register_acc <= alu_result;
                     OPCODE_TYPE_LDA: register_acc <= i_bus_data;
                     OPCODE_TYPE_LDX: register_x <= i_bus_data;
+                    // CLV ($B8 = 101_110_00) aliases the LDY opcode pattern
+                    // (101???00); list it first so it does not corrupt Y.
+                    OPCODE_CLV: ;
                     OPCODE_TYPE_LDY: register_y <= i_bus_data;
                     OPCODE_LAS: begin
                         register_acc <= i_bus_data & register_sp;

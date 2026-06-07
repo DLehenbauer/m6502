@@ -68,6 +68,7 @@ reg [7:0] opcode;
 
 reg [2:0] init_counter;
 reg [7:0] bus_data_write;
+reg [7:0] rmw_new;
 
 alu_op_t alu_operation;
 reg [7:0] alu_result, alu_lhs, alu_rhs;
@@ -314,6 +315,17 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 // POP_STACK/PULL_PCL/PULL_PCH, so register_sp == old_SP + 3.
                 if (opcode == OPCODE_RTI)
                     o_bus_addr <= {8'b1, register_sp};
+                // RMW: the STALL cycle is the dummy write of the old value.
+                // Drive the modified value and keep the bus in write so the
+                // following MICRO_EXECUTE cycle commits it to the same address.
+                priority casez (opcode)
+                OPCODE_TYPE_INC, OPCODE_TYPE_DEC, OPCODE_TYPE_ASL,
+                OPCODE_TYPE_LSR, OPCODE_TYPE_ROL, OPCODE_TYPE_ROR: begin
+                    o_rw           <= 0;
+                    bus_data_write <= rmw_new;
+                end
+                default: ;
+                endcase
             end
             else if (active_microinstruction == PULL_REGISTER) begin
                 current_microinstruction <= next_active_microinstruction;
@@ -518,7 +530,18 @@ always @(negedge i_clk or negedge i_reset_n) begin
                                 o_bus_addr <= {8'b0, i_bus_data};
                                 operation <= OP_ABSOLUTE_LO;
                             end
-                            INDEX_X_INDIRECT, ZP_X, ZP_Y: operation <= OP_LOAD_ZP_INDEXED;
+                            INDEX_X_INDIRECT: operation <= OP_LOAD_ZP_INDEXED;
+                            ZP_X, ZP_Y: begin
+                                // NMOS reads the un-indexed zp base for one
+                                // dummy cycle, then the indexed address. The
+                                // base is on i_bus_data only now, so add the
+                                // index here (zp wraps) and stash it; present
+                                // the base for the dummy read.
+                                effective_address <= {8'b0,
+                                    i_bus_data + (addressing_mode == ZP_X ? register_x : register_y)};
+                                o_bus_addr <= {8'b0, i_bus_data};
+                                operation <= OP_LOAD_ZP_INDEXED;
+                            end
                             // invalid opcode, continue
                             default: begin
                                 current_microinstruction <= next_active_microinstruction;
@@ -526,11 +549,14 @@ always @(negedge i_clk or negedge i_reset_n) begin
                         endcase
                     end
                     else if (operation == OP_LOAD_ZP_INDEXED) begin
-                        o_bus_addr <= {8'b0, alu_result};
                         if (addressing_mode == INDEX_X_INDIRECT) begin
+                            o_bus_addr <= {8'b0, alu_result};
                             operation <= OP_ABSOLUTE_LO;
                         end
                         else begin
+                            // ZP_X/ZP_Y: present the indexed address stashed
+                            // during the base dummy read.
+                            o_bus_addr <= effective_address;
                             current_microinstruction <= next_active_microinstruction;
                             if (active_microinstruction == STORE)
                                 o_rw <= 0;
@@ -620,7 +646,12 @@ always @(negedge i_clk or negedge i_reset_n) begin
             end
             else if (active_microinstruction == ALU_MODIFY) begin
                 current_microinstruction <= next_active_microinstruction;
-                bus_data_write <= alu_result;
+                // NMOS read-modify-write writes the unmodified value back first
+                // (the dummy write), then the modified value. Drive the OLD byte
+                // for the upcoming write cycle and latch the NEW byte for the one
+                // after, presented from the STALL cycle below.
+                bus_data_write <= i_bus_data;
+                rmw_new        <= alu_result;
             end
 
             // RTI reconstructs PC explicitly: PCL is read at the STALL cycle

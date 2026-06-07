@@ -181,13 +181,21 @@ always @(posedge o_phi2 or negedge i_reset_n) begin
 end
 
 reg nmi_n_sync, nmi_n_sync2, prev_nmi_n, pending_nmi;
+reg irq_n_sync, irq_n_sync2;
 always @(negedge i_clk or negedge i_reset_n) begin
     if (!i_reset_n) begin
         nmi_n_sync <= 1;
         nmi_n_sync2 <= 1;
+        irq_n_sync <= 1;
+        irq_n_sync2 <= 1;
     end else begin
         nmi_n_sync2 <= nmi_n_sync;
         nmi_n_sync <= i_nmi_n;
+        // IRQ is level-sensitive but, like NMI, sampled through a synchronizer
+        // so recognition is delayed relative to the pin. Without this the core
+        // polls i_irq_n one instruction too early.
+        irq_n_sync2 <= irq_n_sync;
+        irq_n_sync <= i_irq_n;
     end
 end
 
@@ -755,7 +763,7 @@ always @(negedge i_clk or negedge i_reset_n) begin
             // so it still reads 0; treat BRK's pending I-set as masking the IRQ
             // poll for the handler's first instruction (IRQ entries are already
             // excluded by !handle_irq).
-            if (next_active_microinstruction == START && !i_irq_n && !status_interrupt
+            if (next_active_microinstruction == START && !irq_n_sync2 && !status_interrupt
                 && !handle_irq && !handle_nmi
                 && !(active_microinstruction == MICRO_EXECUTE && opcode == OPCODE_BRK)) begin
                 handle_irq <= 1;

@@ -410,11 +410,28 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 end
                 else if (operation == OP_CALCULATE_BRANCH_OFFSET) begin
                     if (branch_taken) begin
-                        if ((alu_carry_out && !i_bus_data[7]) || (!alu_carry_out && i_bus_data[7]))
+                        if ((alu_carry_out && !i_bus_data[7]) || (!alu_carry_out && i_bus_data[7])) begin
+                            // Page cross. NMOS spends an extra internal cycle to
+                            // fix PCH. Present the post-operand PC here, then the
+                            // OP_BRANCH_PAGE_CROSS cycle presents the target with
+                            // the not-yet-fixed PCH before the corrected fetch.
+                            // The branch offset is only on i_bus_data this cycle,
+                            // so compute both PC forms now: stash the wrong-PCH
+                            // target in effective_address and the fixed target in
+                            // program_counter for the SYNC fetch two cycles later.
                             operation <= OP_BRANCH_PAGE_CROSS;
+                            o_bus_addr <= program_counter;
+                            effective_address <= {program_counter[15:8], alu_result};
+                            program_counter <= {program_counter[15:8] + (i_bus_data[7] ? 8'hff : 8'h01), alu_result};
+                        end
                         else begin
+                            // No page cross. NMOS presents the post-operand PC
+                            // for one internal cycle (offset add), then fetches
+                            // the target as the next opcode. Hold the current PC
+                            // on the bus here; the MICRO_EXECUTE->START transition
+                            // presents the branch target for the SYNC fetch.
                             program_counter <= {program_counter[15:8], alu_result};
-                            o_bus_addr <= {program_counter[15:8], alu_result};
+                            o_bus_addr <= program_counter;
                             current_microinstruction <= next_active_microinstruction;
                         end
                     end
@@ -423,8 +440,10 @@ always @(negedge i_clk or negedge i_reset_n) begin
                     end
                 end
                 else if (operation == OP_BRANCH_PAGE_CROSS) begin
-                        program_counter <= {program_counter[15:8] + (i_bus_data[7] ? 8'hff : 8'h01), alu_result};
-                        o_bus_addr <= {program_counter[15:8] + (i_bus_data[7] ? 8'hff : 8'h01), alu_result};
+                        // Present the wrong-PCH target stashed last cycle; the
+                        // fixed PC is already in program_counter for the SYNC
+                        // opcode fetch that the MICRO_EXECUTE->START step drives.
+                        o_bus_addr <= effective_address;
                         current_microinstruction <= next_active_microinstruction;
                 end
             end

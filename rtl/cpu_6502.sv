@@ -530,15 +530,14 @@ always @(negedge i_clk or negedge i_reset_n) begin
                                 o_bus_addr <= {8'b0, i_bus_data};
                                 operation <= OP_ABSOLUTE_LO;
                             end
-                            INDEX_X_INDIRECT: operation <= OP_LOAD_ZP_INDEXED;
-                            ZP_X, ZP_Y: begin
+                            INDEX_X_INDIRECT, ZP_X, ZP_Y: begin
                                 // NMOS reads the un-indexed zp base for one
                                 // dummy cycle, then the indexed address. The
                                 // base is on i_bus_data only now, so add the
                                 // index here (zp wraps) and stash it; present
                                 // the base for the dummy read.
                                 effective_address <= {8'b0,
-                                    i_bus_data + (addressing_mode == ZP_X ? register_x : register_y)};
+                                    i_bus_data + (addressing_mode == ZP_Y ? register_y : register_x)};
                                 o_bus_addr <= {8'b0, i_bus_data};
                                 operation <= OP_LOAD_ZP_INDEXED;
                             end
@@ -549,14 +548,14 @@ always @(negedge i_clk or negedge i_reset_n) begin
                         endcase
                     end
                     else if (operation == OP_LOAD_ZP_INDEXED) begin
+                        // Present the indexed address stashed during the base
+                        // dummy read. INDEX_X_INDIRECT continues to read the
+                        // pointer there; ZP_X/ZP_Y read the operand directly.
+                        o_bus_addr <= effective_address;
                         if (addressing_mode == INDEX_X_INDIRECT) begin
-                            o_bus_addr <= {8'b0, alu_result};
                             operation <= OP_ABSOLUTE_LO;
                         end
                         else begin
-                            // ZP_X/ZP_Y: present the indexed address stashed
-                            // during the base dummy read.
-                            o_bus_addr <= effective_address;
                             current_microinstruction <= next_active_microinstruction;
                             if (active_microinstruction == STORE)
                                 o_rw <= 0;
@@ -567,7 +566,12 @@ always @(negedge i_clk or negedge i_reset_n) begin
                             program_counter <= program_counter + 1;
 
                         effective_address <= {8'b0, i_bus_data};
-                        o_bus_addr <= o_bus_addr + 1;
+                        // Zero-page indirect pointers wrap within page zero; the
+                        // high byte is read from (base+1) & $FF, not base+1.
+                        if (addressing_mode == INDEX_X_INDIRECT || addressing_mode == INDEX_Y_INDIRECT)
+                            o_bus_addr <= {8'b0, o_bus_addr[7:0] + 8'b1};
+                        else
+                            o_bus_addr <= o_bus_addr + 1;
                         operation <= OP_ABSOLUTE_HI;
 
                         if (opcode == OPCODE_JMP_ABS || opcode == OPCODE_JSR)

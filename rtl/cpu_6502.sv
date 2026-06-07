@@ -585,7 +585,9 @@ always @(negedge i_clk or negedge i_reset_n) begin
                         if (opcode == OPCODE_JMP_IND) begin
                             operation <= OP_LOAD_INDIRECT_LO;
                         end
-                        else if (alu_carry_out || (active_microinstruction == STORE && addressing_mode != ABSOLUTE))
+                        else if (alu_carry_out || (active_microinstruction == STORE
+                                 && addressing_mode != ABSOLUTE
+                                 && addressing_mode != INDEX_X_INDIRECT))
                             operation <= OP_ABSOLUTE_PAGE_CROSS;
                         else begin
                             priority casez (opcode)

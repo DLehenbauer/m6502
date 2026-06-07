@@ -408,7 +408,13 @@ always @(negedge i_clk or negedge i_reset_n) begin
             else if (active_microinstruction == LOAD_PC_EFFECTIVE_HI || active_microinstruction == READ_VECTOR_HI) begin
                 current_microinstruction <= next_active_microinstruction;
                 program_counter <= {8'b0, i_bus_data};
-                o_bus_addr <= o_bus_addr + 1;
+                // NMOS JMP () page bug: the pointer high byte is read from the
+                // same page, so the low byte wraps $FF -> $00 with no carry
+                // into the high byte. Interrupt-vector reads increment normally.
+                if (opcode == OPCODE_JMP_IND)
+                    o_bus_addr <= {o_bus_addr[15:8], o_bus_addr[7:0] + 8'b1};
+                else
+                    o_bus_addr <= o_bus_addr + 1;
             end
             else if (active_microinstruction == LOAD_VECTOR) begin
                 current_microinstruction <= next_active_microinstruction;

@@ -237,6 +237,7 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 end
                 OPCODE_TYPE_STX: bus_data_write <= register_x;
                 OPCODE_TYPE_STY: bus_data_write <= register_y;
+                OPCODE_TYPE_SAX: bus_data_write <= register_acc & register_x;
                 OPCODE_BRK: begin
                     if (active_microinstruction == WRITE_SR)
                         // Push SR with B=1 (bit 4 set) to indicate software source (BRK).

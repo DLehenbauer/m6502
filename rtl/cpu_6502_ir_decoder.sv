@@ -95,6 +95,16 @@ always_comb begin
         endcase
     end
 
+    OPCODE_TYPE_SAX: begin
+        case (instruction_mode)
+            3'b000: o_operand_type = INDEX_X_INDIRECT;
+            3'b001: o_operand_type = ZP;
+            3'b011: o_operand_type = ABSOLUTE;
+            3'b101: o_operand_type = ZP_Y;
+            default: o_operand_type = IMPLIED;
+        endcase
+    end
+
     OPCODE_TYPE_BIT: begin
         case (instruction_mode)
             3'b001: o_operand_type = ZP;

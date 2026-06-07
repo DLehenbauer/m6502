@@ -59,6 +59,11 @@ localparam OPCODE_TYPE_INC = 8'b111???10;
 // absolute,Y for the indexed forms).
 localparam OPCODE_TYPE_LAX = 8'b101???11;
 
+// --- cc=11: undocumented store (SAX) — 8'b100_xxx_11 ---
+// Stores A AND X to memory; affects no flags. Addressing mirrors STX
+// (zero page,Y for the indexed form).
+localparam OPCODE_TYPE_SAX = 8'b100???11;
+
 // --- cc=00: Control group — 8'baaa_xxx_00 ---
 //
 //  bbb | Mode

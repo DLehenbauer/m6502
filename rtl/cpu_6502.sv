@@ -69,6 +69,11 @@ reg [7:0] opcode;
 reg [2:0] init_counter;
 reg [7:0] bus_data_write;
 reg [7:0] rmw_new;
+// LAS abs,Y: A=X=S=M&old_S are published together for one transient commit
+// cycle, then X and S revert to old_S (A keeps M&old_S). las_old_s saves the
+// pre-LAS stack pointer; las_revert fires the revert on the next edge.
+reg [7:0] las_old_s;
+reg las_revert;
 reg [1:0] jam_count;
 
 alu_op_t alu_operation;
@@ -761,9 +766,16 @@ always @(negedge i_clk or negedge i_reset_n) begin
         register_y <= 0;
         register_x <= 0;
         register_sp <= 0;
+        las_revert <= 0;
+        las_old_s <= 0;
     end
     else begin
         if (i_rdy) begin
+            if (las_revert) begin
+                register_x  <= las_old_s;
+                register_sp <= las_old_s;
+            end
+            las_revert <= 0;
             case (active_microinstruction)
                 POP_STACK: register_sp <= register_sp + 8'b1;
                 PUSH_STACK, PUSH_PCL, PUSH_PCH, WRITE_SR: register_sp <= register_sp - 8'b1;
@@ -799,6 +811,10 @@ always @(negedge i_clk or negedge i_reset_n) begin
                         register_acc <= i_bus_data & register_sp;
                         register_x   <= i_bus_data & register_sp;
                         register_sp  <= i_bus_data & register_sp;
+                        // Publish the transient commit window now; revert X and
+                        // S to old_S on the next edge.
+                        las_old_s  <= register_sp;
+                        las_revert <= 1;
                     end
                     OPCODE_TYPE_LAX: begin
                         register_acc <= i_bus_data;

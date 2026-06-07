@@ -210,22 +210,35 @@ wire seq_advance = rdy_q || (o_rw == 1'b0);
 // recognition must see it this cycle, so consult the combinational edge
 // alongside the latched pending_nmi.
 wire nmi_edge_now = prev_nmi_n && !nmi_n_sync2;
-always @(negedge i_clk or negedge i_reset_n) begin
+
+// NMOS samples the asynchronous /IRQ and /NMI pins during phi2 (the clock
+// high phase), like /SO above. Sample the first synchronizer stage on the
+// phi2 posedge so an interrupt asserted on phi2 of a cycle is captured that
+// same cycle. Sampling this first stage on the negedge instead missed a
+// phi2 assertion by a full cycle, deferring the interrupt a whole
+// instruction on short (two-cycle) instructions where the recognition
+// window is tight.
+always @(posedge o_phi2 or negedge i_reset_n) begin
     if (!i_reset_n) begin
         nmi_n_sync <= 1;
-        nmi_n_sync2 <= 1;
         irq_n_sync <= 1;
+    end else begin
+        nmi_n_sync <= i_nmi_n;
+        irq_n_sync <= i_irq_n;
+    end
+end
+
+// Second synchronizer stage plus the RDY lag, on the negedge that drives
+// recognition and the sequencer.
+always @(negedge i_clk or negedge i_reset_n) begin
+    if (!i_reset_n) begin
+        nmi_n_sync2 <= 1;
         irq_n_sync2 <= 1;
         rdy_q <= 1;
     end else begin
         nmi_n_sync2 <= nmi_n_sync;
-        nmi_n_sync <= i_nmi_n;
         rdy_q <= i_rdy;
-        // IRQ is level-sensitive but, like NMI, sampled through a synchronizer
-        // so recognition is delayed relative to the pin. Without this the core
-        // polls i_irq_n one instruction too early.
         irq_n_sync2 <= irq_n_sync;
-        irq_n_sync <= i_irq_n;
     end
 end
 
@@ -810,6 +823,8 @@ always @(negedge i_clk or negedge i_reset_n) begin
             // so it still reads 0; treat BRK's pending I-set as masking the IRQ
             // poll for the handler's first instruction (IRQ entries are already
             // excluded by !handle_irq).
+            // IRQ is level-sensitive, sampled through the synchronizer so
+            // recognition is delayed relative to the pin.
             if (next_active_microinstruction == START && !irq_n_sync2 && !status_interrupt
                 && !handle_irq && !handle_nmi
                 && !(active_microinstruction == MICRO_EXECUTE && opcode == OPCODE_BRK)) begin

@@ -765,7 +765,11 @@ always @(negedge i_clk or negedge i_reset_n) begin
         register_acc <= 0;
         register_y <= 0;
         register_x <= 0;
-        register_sp <= 0;
+        // Match the Perfect6502 oracle's post-reset stack pointer. NMOS leaves
+        // SP undefined at power-on then does three dummy stack reads during the
+        // reset sequence; the oracle's netlist settles on $BD. Tests that need
+        // a known SP use TXS; the post-reset smoke tests rely on this value.
+        register_sp <= 8'hBD;
         las_revert <= 0;
         las_old_s <= 0;
     end

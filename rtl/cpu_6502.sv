@@ -146,6 +146,16 @@ always_comb begin
     end
 end
 
+// NMI edge that synchronizes exactly on the LOAD_VECTOR cycle of an
+// in-flight IRQ or BRK entry: too late for pending_nmi (registered the
+// next edge) yet it must still steer the vector this cycle. Drives both
+// the handle_nmi latch and the LOAD_VECTOR address mux. Gated on
+// !handle_nmi so an edge already consumed by the push-cycle hijack path
+// does not re-fire.
+wire nmi_load_vector_hijack = nmi_edge_now && !handle_nmi
+    && (handle_irq || opcode == OPCODE_BRK)
+    && active_microinstruction == LOAD_VECTOR;
+
 reg branch_taken;
 always_comb begin
     case (current_instruction)
@@ -182,6 +192,14 @@ end
 
 reg nmi_n_sync, nmi_n_sync2, prev_nmi_n, pending_nmi;
 reg irq_n_sync, irq_n_sync2;
+
+// A freshly synchronized NMI falling edge. pending_nmi latches this for
+// recognition at a later instruction boundary, but pending_nmi is a
+// non-blocking register: on the negedge the edge is detected it still
+// reads 0. When the edge lands exactly on an instruction boundary the
+// recognition must see it this cycle, so consult the combinational edge
+// alongside the latched pending_nmi.
+wire nmi_edge_now = prev_nmi_n && !nmi_n_sync2;
 always @(negedge i_clk or negedge i_reset_n) begin
     if (!i_reset_n) begin
         nmi_n_sync <= 1;
@@ -468,7 +486,7 @@ always @(negedge i_clk or negedge i_reset_n) begin
             end
             else if (active_microinstruction == LOAD_VECTOR) begin
                 current_microinstruction <= next_active_microinstruction;
-                o_bus_addr <= handle_nmi ? NMI_VECTOR : IRQ_VECTOR;
+                o_bus_addr <= (handle_nmi || nmi_load_vector_hijack) ? NMI_VECTOR : IRQ_VECTOR;
             end
             else if (active_microinstruction == MAYBE_BRANCH) begin
                 if (first_microinstruction) begin
@@ -768,7 +786,7 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 && !(active_microinstruction == MICRO_EXECUTE && opcode == OPCODE_BRK)) begin
                 handle_irq <= 1;
             end
-            else if (next_active_microinstruction == START && pending_nmi && !handle_irq && !handle_nmi && !init) begin
+            else if (next_active_microinstruction == START && (pending_nmi || nmi_edge_now) && !handle_irq && !handle_nmi && !init) begin
                 handle_irq <= 1;
                 handle_nmi <= 1;
                 pending_nmi <= 0;
@@ -784,6 +802,17 @@ always @(negedge i_clk or negedge i_reset_n) begin
                     || active_microinstruction == PUSH_PCH
                     || active_microinstruction == PUSH_PCL
                     || active_microinstruction == WRITE_SR)) begin
+                handle_nmi <= 1;
+                pending_nmi <= 0;
+            end
+            // Same-cycle race: an NMI edge that synchronizes exactly on the
+            // LOAD_VECTOR cycle has not yet registered into pending_nmi, so the
+            // registered hijack window above (which closes at WRITE_SR) misses
+            // it. Steer handle_nmi from the combinational edge here; the vector
+            // address driven by the LOAD_VECTOR handler consults the same edge.
+            // Gated on !handle_nmi so an edge already consumed by the push-cycle
+            // path does not re-fire.
+            else if (nmi_load_vector_hijack) begin
                 handle_nmi <= 1;
                 pending_nmi <= 0;
             end

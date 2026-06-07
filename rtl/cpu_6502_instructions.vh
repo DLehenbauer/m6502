@@ -83,6 +83,7 @@ localparam OPCODE_ALR  = 8'h4B;
 localparam OPCODE_ARR  = 8'h6B;
 localparam OPCODE_AXS  = 8'hCB;
 localparam OPCODE_USBC = 8'hEB;
+localparam OPCODE_LAS  = 8'hBB;
 
 // --- cc=00: Control group — 8'baaa_xxx_00 ---
 //

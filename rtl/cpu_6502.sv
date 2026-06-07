@@ -741,6 +741,11 @@ always @(negedge i_clk or negedge i_reset_n) begin
                     OPCODE_TYPE_LDA: register_acc <= i_bus_data;
                     OPCODE_TYPE_LDX: register_x <= i_bus_data;
                     OPCODE_TYPE_LDY: register_y <= i_bus_data;
+                    OPCODE_LAS: begin
+                        register_acc <= i_bus_data & register_sp;
+                        register_x   <= i_bus_data & register_sp;
+                        register_sp  <= i_bus_data & register_sp;
+                    end
                     OPCODE_TYPE_LAX: begin
                         register_acc <= i_bus_data;
                         register_x   <= i_bus_data;
@@ -876,6 +881,10 @@ always @(negedge i_clk or negedge i_reset_n) begin
             OPCODE_TYPE_AND, OPCODE_TYPE_EOR, OPCODE_TYPE_ORA: begin
                 status_negative <= alu_result[7];
                 status_zero <= alu_result == 0;
+            end
+            OPCODE_LAS: begin
+                status_negative <= i_bus_data[7] & register_sp[7];
+                status_zero <= (i_bus_data & register_sp) == 0;
             end
             OPCODE_TYPE_LDA, OPCODE_TYPE_LDX, OPCODE_TYPE_LDY, OPCODE_TYPE_LAX: begin
                 status_negative <= i_bus_data[7];

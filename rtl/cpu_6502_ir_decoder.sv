@@ -103,6 +103,9 @@ always_comb begin
     OPCODE_ANC, OPCODE_ANC2, OPCODE_ALR, OPCODE_ARR, OPCODE_AXS, OPCODE_USBC:
         o_operand_type = IMMEDIATE;
 
+    OPCODE_LAS:
+        o_operand_type = ABSOLUTE_Y;
+
     OPCODE_TYPE_LAX: begin
         case (instruction_mode)
             3'b000: o_operand_type = INDEX_X_INDIRECT;

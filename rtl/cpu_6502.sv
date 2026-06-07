@@ -1087,7 +1087,10 @@ always @(negedge i_clk or negedge i_reset_n) begin
             endcase
         end
 
-        if (trigger_overflow)
+        // NMOS CLV wins over a coincident SO falling edge: CLV holds the
+        // V-clear line across its execution, so an SO edge latched during the
+        // CLV instruction window is overridden.
+        if (trigger_overflow && opcode != OPCODE_CLV)
             status_overflow <= 1;
     end
 end

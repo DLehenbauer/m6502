@@ -105,6 +105,20 @@ always_comb begin
         endcase
     end
 
+    OPCODE_TYPE_SLO, OPCODE_TYPE_RLA, OPCODE_TYPE_SRE,
+    OPCODE_TYPE_RRA, OPCODE_TYPE_DCP, OPCODE_TYPE_ISB: begin
+        case (instruction_mode)
+            3'b000: o_operand_type = INDEX_X_INDIRECT;
+            3'b001: o_operand_type = ZP;
+            3'b011: o_operand_type = ABSOLUTE;
+            3'b100: o_operand_type = INDEX_Y_INDIRECT;
+            3'b101: o_operand_type = ZP_X;
+            3'b110: o_operand_type = ABSOLUTE_Y;
+            3'b111: o_operand_type = ABSOLUTE_X;
+            default: o_operand_type = IMPLIED;
+        endcase
+    end
+
     OPCODE_TYPE_BIT: begin
         case (instruction_mode)
             3'b001: o_operand_type = ZP;

@@ -229,6 +229,12 @@ always @(negedge i_clk or negedge i_reset_n) begin
             end
             else begin
                 priority casez (opcode)
+                // SH-family: store reg AND (high(base)+1). The base high byte
+                // is in effective_address[15:8] (page-cross high fixup skipped).
+                OPCODE_SHY: bus_data_write <= register_y & (effective_address[15:8] + 8'b1);
+                OPCODE_SHX: bus_data_write <= register_x & (effective_address[15:8] + 8'b1);
+                OPCODE_SHA, OPCODE_SHA2, OPCODE_TAS:
+                    bus_data_write <= register_acc & register_x & (effective_address[15:8] + 8'b1);
                 OPCODE_TYPE_STA, OPCODE_PHA: bus_data_write <= register_acc;
                 OPCODE_PHP: begin
                     // Push SR with B=1 (bit 4 set) to indicate software source (PHP).
@@ -630,11 +636,25 @@ always @(negedge i_clk or negedge i_reset_n) begin
                         current_microinstruction <= next_active_microinstruction;
                     end
                     else if (operation == OP_ABSOLUTE_PAGE_CROSS) begin
-                        effective_address <= {alu_result, effective_address[7:0]};
-                        o_bus_addr <= {alu_result, effective_address[7:0]};
-                        current_microinstruction <= next_active_microinstruction;
-                        if (active_microinstruction == STORE)
+                        // SH-family stores skip the page-cross high-byte fixup:
+                        // the target keeps high(base) and the value already
+                        // masked it. Other ops apply the carried high byte.
+                        priority casez (opcode)
+                        OPCODE_SHY, OPCODE_SHX, OPCODE_SHA, OPCODE_SHA2, OPCODE_TAS: begin
+                            o_bus_addr <= effective_address;
                             o_rw <= 0;
+                            // TAS also copies A AND X into the stack pointer.
+                            if (opcode == OPCODE_TAS)
+                                register_sp <= register_acc & register_x;
+                        end
+                        default: begin
+                            effective_address <= {alu_result, effective_address[7:0]};
+                            o_bus_addr <= {alu_result, effective_address[7:0]};
+                            if (active_microinstruction == STORE)
+                                o_rw <= 0;
+                        end
+                        endcase
+                        current_microinstruction <= next_active_microinstruction;
                     end
                 end
             end

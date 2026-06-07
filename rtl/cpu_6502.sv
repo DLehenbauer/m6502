@@ -773,6 +773,16 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 handle_nmi <= 1;
                 pending_nmi <= 0;
             end
+
+            // NMI hijack: an NMI edge latched during an in-flight IRQ or BRK
+            // entry redirects it to the NMI vector. Fire at WRITE_SR, after the
+            // P push value is locked (so BRK keeps B=1, IRQ keeps B=0) but
+            // before LOAD_VECTOR selects the vector from handle_nmi.
+            if (active_microinstruction == WRITE_SR && pending_nmi && !handle_nmi
+                && (handle_irq || opcode == OPCODE_BRK)) begin
+                handle_nmi <= 1;
+                pending_nmi <= 0;
+            end
         end
     end
 end

@@ -81,6 +81,7 @@ localparam OPCODE_ANC  = 8'h0B;
 localparam OPCODE_ANC2 = 8'h2B;
 localparam OPCODE_ALR  = 8'h4B;
 localparam OPCODE_ARR  = 8'h6B;
+localparam OPCODE_XAA  = 8'h8B;
 localparam OPCODE_AXS  = 8'hCB;
 localparam OPCODE_USBC = 8'hEB;
 localparam OPCODE_LAS  = 8'hBB;

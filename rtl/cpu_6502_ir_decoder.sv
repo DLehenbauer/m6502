@@ -109,7 +109,7 @@ always_comb begin
 
     // Undocumented immediate ALU ops: AND-based (ANC/ALR), CMP-based (AXS),
     // and the SBC alias (USBC). Listed before the cc=11 RMW combo patterns.
-    OPCODE_ANC, OPCODE_ANC2, OPCODE_ALR, OPCODE_ARR, OPCODE_AXS, OPCODE_USBC:
+    OPCODE_ANC, OPCODE_ANC2, OPCODE_ALR, OPCODE_ARR, OPCODE_XAA, OPCODE_AXS, OPCODE_USBC:
         o_operand_type = IMMEDIATE;
 
     OPCODE_LAS:

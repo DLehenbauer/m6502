@@ -773,6 +773,8 @@ always @(negedge i_clk or negedge i_reset_n) begin
                     // Undocumented immediate ALU ops (before the cc=11 combos).
                     OPCODE_ANC, OPCODE_ANC2, OPCODE_USBC:
                         register_acc <= alu_result;
+                    OPCODE_XAA:
+                        register_acc <= register_x & i_bus_data;
                     OPCODE_ALR:
                         register_acc <= {1'b0, alu_result[7:1]};
                     OPCODE_ARR:
@@ -921,6 +923,10 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 status_negative <= alu_result[7];
                 status_zero <= alu_result == 0;
                 status_carry <= alu_result[7];
+            end
+            OPCODE_XAA: begin
+                status_negative <= (register_x & i_bus_data) >> 7;
+                status_zero <= (register_x & i_bus_data) == 0;
             end
             OPCODE_ALR: begin
                 status_negative <= 1'b0;

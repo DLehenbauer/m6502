@@ -104,7 +104,7 @@ reg first_microinstruction;
 // the negedge i_clk that starts each opcode-fetch cycle) meets this timing. We
 // require combinational logic here because we need the post-edge values of
 // handle_irq/handle_nmi.
-assign o_sync = first_microinstruction && !handle_irq && !handle_nmi;
+assign o_sync = first_microinstruction;
 
 microinstruction_t current_microinstruction, prev_mi;
 reg [7:0] current_instruction;
@@ -382,7 +382,11 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 o_bus_addr <= {8'b1, register_sp + 8'b1};
             end
             else if (active_microinstruction == READ_ADL) begin
-                program_counter <= program_counter + 2;
+                // BRK advances PC past its padding byte. IRQ/NMI entry re-reads
+                // the same PC (dummy) and must not advance it; the unmodified PC
+                // is what gets pushed.
+                if (!handle_irq && !handle_nmi)
+                    program_counter <= program_counter + 2;
                 current_microinstruction <= next_active_microinstruction;
             end
             else if (active_microinstruction == BUFFER_ADL) begin
@@ -748,13 +752,11 @@ always @(negedge i_clk or negedge i_reset_n) begin
 
             if (next_active_microinstruction == START && !i_irq_n && !status_interrupt && !handle_irq && !handle_nmi) begin
                 handle_irq <= 1;
-                o_bus_addr <= {8'b1, register_sp};
             end
             else if (next_active_microinstruction == START && pending_nmi && !handle_irq && !handle_nmi && !init) begin
                 handle_irq <= 1;
                 handle_nmi <= 1;
                 pending_nmi <= 0;
-                o_bus_addr <= {8'b1, register_sp};
             end
         end
     end

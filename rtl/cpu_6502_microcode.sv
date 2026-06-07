@@ -30,7 +30,9 @@ always_comb begin
         OPCODE_SEC, OPCODE_CLC, OPCODE_SEI, OPCODE_CLI, OPCODE_TAX,
         OPCODE_TAY, OPCODE_TXA, OPCODE_TYA, OPCODE_TSX, OPCODE_TXS,
         OPCODE_INX, OPCODE_INY, OPCODE_DEY, OPCODE_DEX, OPCODE_CLD,
-        OPCODE_CLV, OPCODE_NOP, OPCODE_SED: begin
+        OPCODE_CLV, OPCODE_NOP, OPCODE_SED,
+        // Undocumented single-byte implied NOPs.
+        8'h1A, 8'h3A, 8'h5A, 8'h7A, 8'hDA, 8'hFA: begin
             case (i_current_microinstruction)
             START: o_next_microinstruction = NOP;
             NOP: o_next_microinstruction = MICRO_EXECUTE;

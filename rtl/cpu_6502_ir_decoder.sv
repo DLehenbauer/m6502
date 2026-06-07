@@ -16,7 +16,9 @@ always_comb begin
     OPCODE_CLC, OPCODE_SEC, OPCODE_CLI, OPCODE_SEI,
     OPCODE_TYA, OPCODE_CLV, OPCODE_CLD, OPCODE_SED,
     OPCODE_TXA, OPCODE_TXS, OPCODE_TAX, OPCODE_TSX,
-    OPCODE_DEX:
+    OPCODE_DEX,
+    // Undocumented single-byte implied NOPs.
+    8'h1A, 8'h3A, 8'h5A, 8'h7A, 8'hDA, 8'hFA:
         o_operand_type = IMPLIED;
 
     OPCODE_TYPE_BRANCH:

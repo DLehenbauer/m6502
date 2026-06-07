@@ -373,35 +373,52 @@ always @(negedge i_clk or negedge i_reset_n) begin
             end
             else if (active_microinstruction == STALL) begin
                 current_microinstruction <= next_active_microinstruction;
-                // PLA/PLP: present the value address (0x100 + old_SP + 1)
-                // for the final pull read. POP_STACK already incremented SP,
-                // so register_sp == old_SP + 1 here.
-                if (opcode == OPCODE_PLA || opcode == OPCODE_PLP)
-                    o_bus_addr <= {8'b1, register_sp};
-                // RTI: present the PCH stack address (0x100 + old_SP + 3) for
-                // the final pull read. SP has been incremented three times by
-                // POP_STACK/PULL_PCL/PULL_PCH, so register_sp == old_SP + 3.
-                if (opcode == OPCODE_RTI)
-                    o_bus_addr <= {8'b1, register_sp};
-                // RTS C5: read the pulled PCH, compose the return-1 PC, and
-                // present it for the final dummy read before the increment.
-                if (opcode == OPCODE_RTS) begin
-                    program_counter <= {i_bus_data, effective_address_lo};
-                    o_bus_addr <= {i_bus_data, effective_address_lo};
+                // The START-collapse makes active==STALL on the opcode-fetch
+                // cycle of an accumulator shift (START->STALL), where `opcode`
+                // still holds the PREVIOUS instruction and the bus address is
+                // already steered to PC+1 by the first_microinstruction block.
+                // Only a real STALL cycle (the dummy read/write of a multi-cycle
+                // op) may apply this previous-opcode address/write handling;
+                // skip it on the collapsed fetch so a preceding PLA/PLP/RTI/RTS
+                // or memory-RMW does not corrupt the shift's dummy read.
+                if (!first_microinstruction) begin
+                    // PLA/PLP: present the value address (0x100 + old_SP + 1)
+                    // for the final pull read. POP_STACK already incremented SP,
+                    // so register_sp == old_SP + 1 here.
+                    if (opcode == OPCODE_PLA || opcode == OPCODE_PLP)
+                        o_bus_addr <= {8'b1, register_sp};
+                    // RTI: present the PCH stack address (0x100 + old_SP + 3) for
+                    // the final pull read. SP has been incremented three times by
+                    // POP_STACK/PULL_PCL/PULL_PCH, so register_sp == old_SP + 3.
+                    if (opcode == OPCODE_RTI)
+                        o_bus_addr <= {8'b1, register_sp};
+                    // RTS C5: read the pulled PCH, compose the return-1 PC, and
+                    // present it for the final dummy read before the increment.
+                    if (opcode == OPCODE_RTS) begin
+                        program_counter <= {i_bus_data, effective_address_lo};
+                        o_bus_addr <= {i_bus_data, effective_address_lo};
+                    end
+                    // RMW: the STALL cycle is the dummy write of the old value.
+                    // Drive the modified value and keep the bus in write so the
+                    // following MICRO_EXECUTE cycle commits it to the same
+                    // address. The accumulator shift/rotate opcodes
+                    // ($0A/$2A/$4A/$6A) share the OPCODE_TYPE_* casez patterns
+                    // with their memory forms but operate in-register: their
+                    // STALL cycle is a plain dummy read, never a bus write. List
+                    // them first so the priority casez excludes them.
+                    priority casez (opcode)
+                    OPCODE_ASL_ACC, OPCODE_LSR_ACC,
+                    OPCODE_ROL_ACC, OPCODE_ROR_ACC: ;
+                    OPCODE_TYPE_INC, OPCODE_TYPE_DEC, OPCODE_TYPE_ASL,
+                    OPCODE_TYPE_LSR, OPCODE_TYPE_ROL, OPCODE_TYPE_ROR,
+                    OPCODE_TYPE_SLO, OPCODE_TYPE_RLA, OPCODE_TYPE_SRE,
+                    OPCODE_TYPE_RRA, OPCODE_TYPE_DCP, OPCODE_TYPE_ISB: begin
+                        o_rw           <= 0;
+                        bus_data_write <= rmw_new;
+                    end
+                    default: ;
+                    endcase
                 end
-                // RMW: the STALL cycle is the dummy write of the old value.
-                // Drive the modified value and keep the bus in write so the
-                // following MICRO_EXECUTE cycle commits it to the same address.
-                priority casez (opcode)
-                OPCODE_TYPE_INC, OPCODE_TYPE_DEC, OPCODE_TYPE_ASL,
-                OPCODE_TYPE_LSR, OPCODE_TYPE_ROL, OPCODE_TYPE_ROR,
-                OPCODE_TYPE_SLO, OPCODE_TYPE_RLA, OPCODE_TYPE_SRE,
-                OPCODE_TYPE_RRA, OPCODE_TYPE_DCP, OPCODE_TYPE_ISB: begin
-                    o_rw           <= 0;
-                    bus_data_write <= rmw_new;
-                end
-                default: ;
-                endcase
             end
             else if (active_microinstruction == PULL_REGISTER) begin
                 current_microinstruction <= next_active_microinstruction;

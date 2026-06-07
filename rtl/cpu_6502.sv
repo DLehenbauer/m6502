@@ -309,12 +309,17 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 // so register_sp == old_SP + 1 here.
                 if (opcode == OPCODE_PLA || opcode == OPCODE_PLP)
                     o_bus_addr <= {8'b1, register_sp};
+                // RTI: present the PCH stack address (0x100 + old_SP + 3) for
+                // the final pull read. SP has been incremented three times by
+                // POP_STACK/PULL_PCL/PULL_PCH, so register_sp == old_SP + 3.
+                if (opcode == OPCODE_RTI)
+                    o_bus_addr <= {8'b1, register_sp};
             end
             else if (active_microinstruction == PULL_REGISTER) begin
                 current_microinstruction <= next_active_microinstruction;
-                // PLA/PLP: this is the cycle after the dummy read at PC.
+                // PLA/PLP/RTI: this is the cycle after the dummy read at PC.
                 // Present the first stack read address (0x100 + old_SP).
-                if (opcode == OPCODE_PLA || opcode == OPCODE_PLP)
+                if (opcode == OPCODE_PLA || opcode == OPCODE_PLP || opcode == OPCODE_RTI)
                     o_bus_addr <= {8'b1, register_sp - 8'b1};
             end
             else if (active_microinstruction == WRITE) begin
@@ -350,7 +355,12 @@ always @(negedge i_clk or negedge i_reset_n) begin
             end
             else if (active_microinstruction == PULL_PCL || active_microinstruction == PULL_PCH) begin
                 current_microinstruction <= next_active_microinstruction;
-                o_bus_addr <= {8'h1, register_sp + 8'b1};
+                // RTI (only user of PULL_PCL/PULL_PCH): present the next stack
+                // read address. register_sp holds old_SP+1 at PULL_PCL and
+                // old_SP+2 at PULL_PCH (POP_STACK/PULL_PCL already
+                // incremented), so {1, register_sp} steps the read pointer to
+                // P+1 (PCL) then P+2 (PCH).
+                o_bus_addr <= {8'h1, register_sp};
             end
             else if (active_microinstruction == READ_PCH) begin
                 effective_address <= {8'b0, i_bus_data};
@@ -446,6 +456,13 @@ always @(negedge i_clk or negedge i_reset_n) begin
                     OPCODE_JSR: begin
                         program_counter <= {i_bus_data, effective_address_lo};
                         o_bus_addr <= {i_bus_data, effective_address_lo};
+                    end
+                    OPCODE_RTI: begin
+                        // Final stack read (PCH). Compose the restored PC from
+                        // the PCL latched at STALL and present it for the next
+                        // opcode fetch.
+                        program_counter <= {i_bus_data, program_counter[7:0]};
+                        o_bus_addr <= {i_bus_data, program_counter[7:0]};
                     end
                     default: ;
                     endcase
@@ -551,12 +568,13 @@ always @(negedge i_clk or negedge i_reset_n) begin
             end
             else if (active_microinstruction == POP_STACK) begin
                 current_microinstruction <= next_active_microinstruction;
-                // PLA/PLP: leave PC on the bus for the NMOS dummy read after
-                // fetch; PULL_REGISTER and STALL present the stack addresses.
-                // RTS/RTI keep the immediate stack address here. POP_STACK
-                // runs in the collapsed fetch cycle, where `opcode` is not yet
-                // latched, so gate on current_instruction.
-                if (current_instruction != OPCODE_PLA && current_instruction != OPCODE_PLP)
+                // PLA/PLP/RTI: leave PC on the bus for the NMOS dummy read
+                // after fetch; the following microinstructions present the
+                // stack addresses. RTS keeps the immediate stack address here.
+                // POP_STACK runs in the collapsed fetch cycle, where `opcode`
+                // is not yet latched, so gate on current_instruction.
+                if (current_instruction != OPCODE_PLA && current_instruction != OPCODE_PLP
+                    && current_instruction != OPCODE_RTI)
                     o_bus_addr <= {8'b1, register_sp + 8'b1};
             end
             else if (active_microinstruction == RESTORE_STACK2) begin
@@ -586,13 +604,11 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 bus_data_write <= alu_result;
             end
 
-            case (prev_mi)
-                PULL_PCL: program_counter <= {8'b0, i_bus_data};
-                PULL_PCH: begin
-                    program_counter <= {i_bus_data, program_counter[7:0]};
-                end
-                default: ;
-            endcase
+            // RTI reconstructs PC explicitly: PCL is read at the STALL cycle
+            // (bus address 0x100 + old_SP + 2) and PCH at MICRO_EXECUTE. The
+            // old prev_mi-based PULL_PCL/PULL_PCH latches are superseded.
+            if (opcode == OPCODE_RTI && active_microinstruction == STALL)
+                program_counter[7:0] <= i_bus_data;
 
             if (next_active_microinstruction == START && !i_irq_n && !status_interrupt && !handle_irq && !handle_nmi) begin
                 handle_irq <= 1;
@@ -677,18 +693,15 @@ always @(negedge i_clk or negedge i_reset_n) begin
             status_zero <= 0;
             status_carry <= 0;
         end
-        if (active_microinstruction == PULL_REGISTER && i_rdy) begin
-            priority casez (opcode)
-            OPCODE_RTI: begin
-                status_negative <= i_bus_data[7];
-                status_overflow <= i_bus_data[6];
-                status_decimal <= i_bus_data[3];
-                status_interrupt <= i_bus_data[2];
-                status_zero <= i_bus_data[1];
-                status_carry <= i_bus_data[0];
-            end
-            default: ;
-            endcase
+        if (active_microinstruction == PULL_PCH && opcode == OPCODE_RTI && i_rdy) begin
+            // RTI pulls P at the first stack read (bus address 0x100+old_SP+1),
+            // which is the PULL_PCH cycle under the dummy-read reordering.
+            status_negative <= i_bus_data[7];
+            status_overflow <= i_bus_data[6];
+            status_decimal <= i_bus_data[3];
+            status_interrupt <= i_bus_data[2];
+            status_zero <= i_bus_data[1];
+            status_carry <= i_bus_data[0];
         end
         if (active_microinstruction == MICRO_EXECUTE && i_rdy) begin
             if (handle_irq)

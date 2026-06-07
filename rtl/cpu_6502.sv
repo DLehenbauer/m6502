@@ -303,8 +303,17 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 current_microinstruction <= next_active_microinstruction;
             end
             else if (active_microinstruction == STALL ||
-                    active_microinstruction == PULL_REGISTER || active_microinstruction == WRITE) begin
+                    active_microinstruction == PULL_REGISTER) begin
                 current_microinstruction <= next_active_microinstruction;
+            end
+            else if (active_microinstruction == WRITE) begin
+                current_microinstruction <= next_active_microinstruction;
+                // PHA/PHP: NMOS reads the dummy byte at PC on the cycle
+                // after fetch, then writes to the stack. PUSH_STACK leaves
+                // PC on the bus for that dummy read; present the stack
+                // write target (old SP = current SP + 1, since PUSH_STACK
+                // already predecremented) for the write cycle that follows.
+                o_bus_addr <= {8'b1, register_sp + 8'b1};
             end
             else if (active_microinstruction == READ_ADL) begin
                 program_counter <= program_counter + 2;
@@ -546,7 +555,9 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 current_microinstruction <= next_active_microinstruction;
             end
             else if (active_microinstruction == PUSH_STACK) begin
-                o_bus_addr <= {8'b1, register_sp};
+                // Leave PC on the bus (set by the opcode-fetch block) so the
+                // cycle after fetch is the NMOS dummy read at PC. The WRITE
+                // microinstruction presents the stack write target next.
                 current_microinstruction <= next_active_microinstruction;
 
                 if (opcode == OPCODE_JSR) begin

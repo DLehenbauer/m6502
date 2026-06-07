@@ -193,6 +193,16 @@ end
 reg nmi_n_sync, nmi_n_sync2, prev_nmi_n, pending_nmi;
 reg irq_n_sync, irq_n_sync2;
 
+// NMOS samples RDY on phi2 and the stall engages on the following cycle:
+// the bus/PC advance for the cycle being entered has already committed, so
+// that cycle's address appears on the bus and is then held while the read
+// repeats. Model that one-cycle lag with a registered copy of i_rdy and
+// gate the sequencer on it. RDY pauses reads only; write cycles bypass the
+// stall and commit normally (NMOS quirk), so the gate also passes when the
+// current bus cycle is a write (o_rw == 0).
+reg rdy_q;
+wire seq_advance = rdy_q || (o_rw == 1'b0);
+
 // A freshly synchronized NMI falling edge. pending_nmi latches this for
 // recognition at a later instruction boundary, but pending_nmi is a
 // non-blocking register: on the negedge the edge is detected it still
@@ -206,9 +216,11 @@ always @(negedge i_clk or negedge i_reset_n) begin
         nmi_n_sync2 <= 1;
         irq_n_sync <= 1;
         irq_n_sync2 <= 1;
+        rdy_q <= 1;
     end else begin
         nmi_n_sync2 <= nmi_n_sync;
         nmi_n_sync <= i_nmi_n;
+        rdy_q <= i_rdy;
         // IRQ is level-sensitive but, like NMI, sampled through a synchronizer
         // so recognition is delayed relative to the pin. Without this the core
         // polls i_irq_n one instruction too early.
@@ -248,7 +260,7 @@ always @(negedge i_clk or negedge i_reset_n) begin
         if (prev_nmi_n && !nmi_n_sync2)
             pending_nmi <= 1;
 
-        if (i_rdy) begin
+        if (seq_advance) begin
             first_microinstruction <= 0;
             prev_mi <= active_microinstruction;
             o_rw <= 0;
@@ -834,7 +846,7 @@ always @(negedge i_clk or negedge i_reset_n) begin
         las_old_s <= 0;
     end
     else begin
-        if (i_rdy) begin
+        if (seq_advance) begin
             if (las_revert) begin
                 register_x  <= las_old_s;
                 register_sp <= las_old_s;
@@ -934,7 +946,7 @@ always @(negedge i_clk or negedge i_reset_n) begin
             status_zero <= 0;
             status_carry <= 0;
         end
-        if (active_microinstruction == PULL_PCH && opcode == OPCODE_RTI && i_rdy) begin
+        if (active_microinstruction == PULL_PCH && opcode == OPCODE_RTI && seq_advance) begin
             // RTI pulls P at the first stack read (bus address 0x100+old_SP+1),
             // which is the PULL_PCH cycle under the dummy-read reordering.
             status_negative <= i_bus_data[7];
@@ -944,7 +956,7 @@ always @(negedge i_clk or negedge i_reset_n) begin
             status_zero <= i_bus_data[1];
             status_carry <= i_bus_data[0];
         end
-        if (active_microinstruction == MICRO_EXECUTE && i_rdy) begin
+        if (active_microinstruction == MICRO_EXECUTE && seq_advance) begin
             if (handle_irq)
                 status_interrupt <= 1;
 
@@ -1095,7 +1107,7 @@ always @(negedge i_clk or negedge i_reset_n) begin
             end
             endcase
         end
-        else if (active_microinstruction == ALU_MODIFY && i_rdy) begin
+        else if (active_microinstruction == ALU_MODIFY && seq_advance) begin
             priority casez (opcode)
             OPCODE_TYPE_ASL, OPCODE_TYPE_LSR, OPCODE_TYPE_ROL, OPCODE_TYPE_ROR: begin
                 status_negative <= alu_result[7];

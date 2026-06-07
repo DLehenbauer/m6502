@@ -322,6 +322,12 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 // POP_STACK/PULL_PCL/PULL_PCH, so register_sp == old_SP + 3.
                 if (opcode == OPCODE_RTI)
                     o_bus_addr <= {8'b1, register_sp};
+                // RTS C5: read the pulled PCH, compose the return-1 PC, and
+                // present it for the final dummy read before the increment.
+                if (opcode == OPCODE_RTS) begin
+                    program_counter <= {i_bus_data, effective_address_lo};
+                    o_bus_addr <= {i_bus_data, effective_address_lo};
+                end
                 // RMW: the STALL cycle is the dummy write of the old value.
                 // Drive the modified value and keep the bus in write so the
                 // following MICRO_EXECUTE cycle commits it to the same address.
@@ -366,8 +372,11 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 current_microinstruction <= next_active_microinstruction;
             end
             else if (active_microinstruction == PC_INC) begin
+                // RTS C4: latch the pulled PCL and present the PCH pull address
+                // (0x100+old_SP+2). register_sp == old_SP+2 here.
+                effective_address[7:0] <= i_bus_data;
+                o_bus_addr <= {8'b1, register_sp};
                 current_microinstruction <= next_active_microinstruction;
-                program_counter <= program_counter + 1;
             end
             else if (active_microinstruction == READ_PCL) begin
                 current_microinstruction <= next_active_microinstruction;
@@ -493,7 +502,11 @@ always @(negedge i_clk or negedge i_reset_n) begin
                         o_bus_addr <= {i_bus_data, program_counter[7:0]};
                     end
                     OPCODE_RTS: begin
-                        o_bus_addr <= program_counter;
+                        // RTS C6: present the dummy read at return-1 (already on
+                        // the bus), then increment PC so the next opcode fetches
+                        // at the return address.
+                        program_counter <= program_counter + 1;
+                        o_bus_addr <= program_counter + 1;
                     end
                     OPCODE_BRK: begin
                         program_counter <= {i_bus_data, program_counter[7:0]};
@@ -666,19 +679,22 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 // POP_STACK runs in the collapsed fetch cycle, where `opcode`
                 // is not yet latched, so gate on current_instruction.
                 if (current_instruction != OPCODE_PLA && current_instruction != OPCODE_PLP
-                    && current_instruction != OPCODE_RTI)
+                    && current_instruction != OPCODE_RTI && current_instruction != OPCODE_RTS)
                     o_bus_addr <= {8'b1, register_sp + 8'b1};
             end
             else if (active_microinstruction == RESTORE_STACK2) begin
-                effective_address <= {i_bus_data, effective_address_lo};
-                if (opcode == OPCODE_RTS)
-                    program_counter <= {i_bus_data, effective_address_lo};
+                // RTS C3: the dummy stack read at 0x100+old_SP. Present the
+                // PCL pull address (old_SP+1) next. register_sp == old_SP+1
+                // here (POP_STACK incremented once); RESTORE_STACK2 increments
+                // again so it becomes old_SP+2 at PC_INC.
+                o_bus_addr <= {8'b1, register_sp};
                 current_microinstruction <= next_active_microinstruction;
             end
             else if (active_microinstruction == RESTORE_STACK) begin
-                effective_address <= {8'b0, i_bus_data};
-                if (next_active_microinstruction == RESTORE_STACK2)
-                    o_bus_addr <= {8'b1, o_bus_addr[7:0] + 8'b1};
+                // RTS C2: the dummy read at PC+1 (left on the bus by the fetch).
+                // Present the dummy stack read address 0x100+old_SP next.
+                // register_sp == old_SP+1 here (POP_STACK already incremented).
+                o_bus_addr <= {8'b1, register_sp - 8'b1};
                 current_microinstruction <= next_active_microinstruction;
             end
             else if (active_microinstruction == PUSH_STACK) begin

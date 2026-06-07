@@ -597,8 +597,18 @@ always @(negedge i_clk or negedge i_reset_n) begin
                             OPCODE_TYPE_INC, OPCODE_TYPE_DEC, OPCODE_TYPE_ROR, OPCODE_TYPE_ROL, OPCODE_TYPE_ASL,
                             OPCODE_TYPE_LSR,
                             OPCODE_TYPE_SLO, OPCODE_TYPE_RLA, OPCODE_TYPE_SRE,
-                            OPCODE_TYPE_RRA, OPCODE_TYPE_DCP, OPCODE_TYPE_ISB:
-                                operation <= OP_ABSOLUTE_PAGE_CROSS;
+                            OPCODE_TYPE_RRA, OPCODE_TYPE_DCP, OPCODE_TYPE_ISB: begin
+                                // Post-indexed RMW always spends the mandatory
+                                // extra read cycle at the effective address.
+                                // Plain absolute and (zp,X) have no post-index,
+                                // so they read once and proceed to the modify.
+                                if (addressing_mode == ABSOLUTE_X
+                                    || addressing_mode == ABSOLUTE_Y
+                                    || addressing_mode == INDEX_Y_INDIRECT)
+                                    operation <= OP_ABSOLUTE_PAGE_CROSS;
+                                else
+                                    current_microinstruction <= next_active_microinstruction;
+                            end
                             default: begin
                                 current_microinstruction <= next_active_microinstruction;
                                 if (active_microinstruction == STORE)

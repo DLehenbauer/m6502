@@ -750,7 +750,14 @@ always @(negedge i_clk or negedge i_reset_n) begin
             if (opcode == OPCODE_RTI && active_microinstruction == STALL)
                 program_counter[7:0] <= i_bus_data;
 
-            if (next_active_microinstruction == START && !i_irq_n && !status_interrupt && !handle_irq && !handle_nmi) begin
+            // BRK sets I as it completes (active==MICRO_EXECUTE here, where
+            // next_active==START). status_interrupt commits on this same edge,
+            // so it still reads 0; treat BRK's pending I-set as masking the IRQ
+            // poll for the handler's first instruction (IRQ entries are already
+            // excluded by !handle_irq).
+            if (next_active_microinstruction == START && !i_irq_n && !status_interrupt
+                && !handle_irq && !handle_nmi
+                && !(active_microinstruction == MICRO_EXECUTE && opcode == OPCODE_BRK)) begin
                 handle_irq <= 1;
             end
             else if (next_active_microinstruction == START && pending_nmi && !handle_irq && !handle_nmi && !init) begin

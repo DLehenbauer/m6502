@@ -302,9 +302,20 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 o_bus_addr <= o_bus_addr + 1;
                 current_microinstruction <= next_active_microinstruction;
             end
-            else if (active_microinstruction == STALL ||
-                    active_microinstruction == PULL_REGISTER) begin
+            else if (active_microinstruction == STALL) begin
                 current_microinstruction <= next_active_microinstruction;
+                // PLA/PLP: present the value address (0x100 + old_SP + 1)
+                // for the final pull read. POP_STACK already incremented SP,
+                // so register_sp == old_SP + 1 here.
+                if (opcode == OPCODE_PLA || opcode == OPCODE_PLP)
+                    o_bus_addr <= {8'b1, register_sp};
+            end
+            else if (active_microinstruction == PULL_REGISTER) begin
+                current_microinstruction <= next_active_microinstruction;
+                // PLA/PLP: this is the cycle after the dummy read at PC.
+                // Present the first stack read address (0x100 + old_SP).
+                if (opcode == OPCODE_PLA || opcode == OPCODE_PLP)
+                    o_bus_addr <= {8'b1, register_sp - 8'b1};
             end
             else if (active_microinstruction == WRITE) begin
                 current_microinstruction <= next_active_microinstruction;
@@ -539,8 +550,14 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 end
             end
             else if (active_microinstruction == POP_STACK) begin
-                o_bus_addr <= {8'b1, register_sp + 8'b1};
                 current_microinstruction <= next_active_microinstruction;
+                // PLA/PLP: leave PC on the bus for the NMOS dummy read after
+                // fetch; PULL_REGISTER and STALL present the stack addresses.
+                // RTS/RTI keep the immediate stack address here. POP_STACK
+                // runs in the collapsed fetch cycle, where `opcode` is not yet
+                // latched, so gate on current_instruction.
+                if (current_instruction != OPCODE_PLA && current_instruction != OPCODE_PLP)
+                    o_bus_addr <= {8'b1, register_sp + 8'b1};
             end
             else if (active_microinstruction == RESTORE_STACK2) begin
                 effective_address <= {i_bus_data, effective_address_lo};
@@ -606,17 +623,15 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 PULL_PCL, PULL_PCH: register_sp <= register_sp + 8'b1;
                 RESTORE_STACK2: register_sp <= register_sp + 8'b1;
                 PULL_REGISTER: begin
-                    priority casez (opcode)
-                    OPCODE_PLA: begin
-                        register_acc <= i_bus_data;
-                    end
-                    default: ;
-                    endcase
+                    // PLA/PLP latch the pulled value at MICRO_EXECUTE (the
+                    // final stack read), not here: this cycle is the dummy
+                    // stack read at 0x100 + old_SP.
                 end
                 MICRO_EXECUTE: begin
                     priority casez (opcode)
-                    OPCODE_PLP, OPCODE_PLA: begin
-                        // no updates
+                    OPCODE_PLA: register_acc <= i_bus_data;
+                    OPCODE_PLP: begin
+                        // no register file update (status handled below)
                     end
                     OPCODE_TYPE_BRANCH: begin
                         // noop
@@ -664,7 +679,7 @@ always @(negedge i_clk or negedge i_reset_n) begin
         end
         if (active_microinstruction == PULL_REGISTER && i_rdy) begin
             priority casez (opcode)
-            OPCODE_PLP, OPCODE_RTI: begin
+            OPCODE_RTI: begin
                 status_negative <= i_bus_data[7];
                 status_overflow <= i_bus_data[6];
                 status_decimal <= i_bus_data[3];
@@ -682,12 +697,21 @@ always @(negedge i_clk or negedge i_reset_n) begin
             priority casez (opcode)
             OPCODE_TYPE_BRANCH: begin
             end
-            OPCODE_PLP, OPCODE_JSR: begin
+            OPCODE_JSR: begin
                 // no updates
             end
+            OPCODE_PLP: begin
+                // PLP pulls P at the final stack read (this cycle).
+                status_negative <= i_bus_data[7];
+                status_overflow <= i_bus_data[6];
+                status_decimal <= i_bus_data[3];
+                status_interrupt <= i_bus_data[2];
+                status_zero <= i_bus_data[1];
+                status_carry <= i_bus_data[0];
+            end
             OPCODE_PLA: begin
-                status_negative <= register_acc[7];
-                status_zero <= register_acc == 0;
+                status_negative <= i_bus_data[7];
+                status_zero <= i_bus_data == 0;
             end
             OPCODE_SEC: status_carry <= 1;
             OPCODE_CLC: status_carry <= 0;

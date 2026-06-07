@@ -752,8 +752,9 @@ always @(negedge i_clk or negedge i_reset_n) begin
                             o_bus_addr <= effective_address;
                             o_rw <= 0;
                             // TAS also copies A AND X into the stack pointer.
-                            if (opcode == OPCODE_TAS)
-                                register_sp <= register_acc & register_x;
+                            // register_sp is owned by the register-file block
+                            // (single-driver for synthesis); the SP write lives
+                            // there, gated on this same store cycle.
                         end
                         default: begin
                             effective_address <= {alu_result, effective_address[7:0]};
@@ -957,6 +958,17 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 end
                 default: ;
             endcase
+
+            // TAS ($9B, SHS): the page-cross store cycle also copies A AND X
+            // into the stack pointer. register_sp is owned by this block, so
+            // apply the write here (not in the sequencer block) to keep
+            // register_sp single-driver for synthesis. The store cycle is
+            // uniquely identified by active==STORE with operation in the
+            // page-cross state for the TAS opcode.
+            if (active_microinstruction == STORE
+                && operation == OP_ABSOLUTE_PAGE_CROSS
+                && opcode == OPCODE_TAS)
+                register_sp <= register_acc & register_x;
         end
     end
 end

@@ -98,6 +98,11 @@ always_comb begin
         endcase
     end
 
+    // Undocumented immediate ALU ops: AND-based (ANC/ALR), CMP-based (AXS),
+    // and the SBC alias (USBC). Listed before the cc=11 RMW combo patterns.
+    OPCODE_ANC, OPCODE_ANC2, OPCODE_ALR, OPCODE_AXS, OPCODE_USBC:
+        o_operand_type = IMMEDIATE;
+
     OPCODE_TYPE_LAX: begin
         case (instruction_mode)
             3'b000: o_operand_type = INDEX_X_INDIRECT;

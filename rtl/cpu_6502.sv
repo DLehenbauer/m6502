@@ -739,6 +739,13 @@ always @(negedge i_clk or negedge i_reset_n) begin
                         register_acc <= i_bus_data;
                         register_x   <= i_bus_data;
                     end
+                    // Undocumented immediate ALU ops (before the cc=11 combos).
+                    OPCODE_ANC, OPCODE_ANC2, OPCODE_USBC:
+                        register_acc <= alu_result;
+                    OPCODE_ALR:
+                        register_acc <= {1'b0, alu_result[7:1]};
+                    OPCODE_AXS:
+                        register_x <= alu_result;
                     OPCODE_TYPE_ADC, OPCODE_TYPE_AND, OPCODE_TYPE_ORA,
                     OPCODE_TYPE_EOR, OPCODE_TYPE_SBC:
                         register_acc <= alu_result;
@@ -867,6 +874,28 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 status_zero <= i_bus_data == 0;
             end
             OPCODE_TYPE_ADC, OPCODE_TYPE_SBC: begin
+                status_negative <= alu_result[7];
+                status_zero <= alu_result == 0;
+                status_carry <= alu_carry_out;
+                status_overflow <= alu_overflow;
+            end
+            // Undocumented immediate ALU ops (before the cc=11 combos).
+            OPCODE_ANC, OPCODE_ANC2: begin
+                status_negative <= alu_result[7];
+                status_zero <= alu_result == 0;
+                status_carry <= alu_result[7];
+            end
+            OPCODE_ALR: begin
+                status_negative <= 1'b0;
+                status_zero <= alu_result[7:1] == 0;
+                status_carry <= alu_result[0];
+            end
+            OPCODE_AXS: begin
+                status_negative <= alu_result[7];
+                status_zero <= alu_result == 0;
+                status_carry <= alu_carry_out;
+            end
+            OPCODE_USBC: begin
                 status_negative <= alu_result[7];
                 status_zero <= alu_result == 0;
                 status_carry <= alu_carry_out;
@@ -1023,6 +1052,19 @@ always_comb begin
             alu_carry_in = status_carry;
             alu_decimal = status_decimal;
             alu_operation = ALU_SBC;
+        end
+        // Undocumented immediate ALU ops (placed before the cc=11 combos).
+        OPCODE_USBC: begin
+            alu_rhs = ~i_bus_data;
+            alu_carry_in = status_carry;
+            alu_decimal = status_decimal;
+            alu_operation = ALU_SBC;
+        end
+        OPCODE_ANC, OPCODE_ANC2, OPCODE_ALR: alu_operation = ALU_AND;
+        OPCODE_AXS: begin
+            alu_lhs = register_acc & register_x;
+            alu_rhs = ~i_bus_data;
+            alu_carry_in = 1;
         end
         // RMW+ALU combos: the accumulator op runs against the modified byte
         // latched in rmw_new (the bus is mid-write this cycle, so i_bus_data

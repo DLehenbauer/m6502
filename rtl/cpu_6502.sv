@@ -744,6 +744,8 @@ always @(negedge i_clk or negedge i_reset_n) begin
                         register_acc <= alu_result;
                     OPCODE_ALR:
                         register_acc <= {1'b0, alu_result[7:1]};
+                    OPCODE_ARR:
+                        register_acc <= {status_carry, alu_result[7:1]};
                     OPCODE_AXS:
                         register_x <= alu_result;
                     OPCODE_TYPE_ADC, OPCODE_TYPE_AND, OPCODE_TYPE_ORA,
@@ -889,6 +891,14 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 status_negative <= 1'b0;
                 status_zero <= alu_result[7:1] == 0;
                 status_carry <= alu_result[0];
+            end
+            OPCODE_ARR: begin
+                // AND then ROR: result = {oldC, (A&imm)[7:1]}. NMOS sets C from
+                // result bit6 (= (A&imm)[7]) and V from result bit6 ^ bit5.
+                status_negative <= status_carry;
+                status_zero <= {status_carry, alu_result[7:1]} == 0;
+                status_carry <= alu_result[7];
+                status_overflow <= alu_result[7] ^ alu_result[6];
             end
             OPCODE_AXS: begin
                 status_negative <= alu_result[7];
@@ -1061,6 +1071,7 @@ always_comb begin
             alu_operation = ALU_SBC;
         end
         OPCODE_ANC, OPCODE_ANC2, OPCODE_ALR: alu_operation = ALU_AND;
+        OPCODE_ARR: alu_operation = ALU_AND;
         OPCODE_AXS: begin
             alu_lhs = register_acc & register_x;
             alu_rhs = ~i_bus_data;

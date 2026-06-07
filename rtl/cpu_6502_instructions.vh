@@ -80,6 +80,7 @@ localparam OPCODE_TYPE_ISB = 8'b111???11;
 localparam OPCODE_ANC  = 8'h0B;
 localparam OPCODE_ANC2 = 8'h2B;
 localparam OPCODE_ALR  = 8'h4B;
+localparam OPCODE_ARR  = 8'h6B;
 localparam OPCODE_AXS  = 8'hCB;
 localparam OPCODE_USBC = 8'hEB;
 

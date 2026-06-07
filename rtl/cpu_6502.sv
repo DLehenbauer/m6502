@@ -73,6 +73,7 @@ reg [7:0] rmw_new;
 alu_op_t alu_operation;
 reg [7:0] alu_result, alu_lhs, alu_rhs;
 reg alu_carry_out, alu_carry_in, alu_overflow, alu_decimal;
+reg alu_negative, alu_zero;
 
 wire init_rdy;
 assign init_rdy = operation == INIT && init_counter == INIT_CYCLES;
@@ -929,8 +930,8 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 status_zero <= i_bus_data == 0;
             end
             OPCODE_TYPE_ADC, OPCODE_TYPE_SBC: begin
-                status_negative <= alu_result[7];
-                status_zero <= alu_result == 0;
+                status_negative <= alu_negative;
+                status_zero <= alu_zero;
                 status_carry <= alu_carry_out;
                 status_overflow <= alu_overflow;
             end
@@ -963,8 +964,8 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 status_carry <= alu_carry_out;
             end
             OPCODE_USBC: begin
-                status_negative <= alu_result[7];
-                status_zero <= alu_result == 0;
+                status_negative <= alu_negative;
+                status_zero <= alu_zero;
                 status_carry <= alu_carry_out;
                 status_overflow <= alu_overflow;
             end
@@ -981,8 +982,8 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 status_carry <= alu_carry_out;
             end
             OPCODE_TYPE_RRA, OPCODE_TYPE_ISB: begin
-                status_negative <= alu_result[7];
-                status_zero <= alu_result == 0;
+                status_negative <= alu_negative;
+                status_zero <= alu_zero;
                 status_carry <= alu_carry_out;
                 status_overflow <= alu_overflow;
             end
@@ -1269,7 +1270,9 @@ cpu_6502_alu alu (
     .i_bcd(alu_decimal),
     .o_result(alu_result),
     .o_carry(alu_carry_out),
-    .o_overflow(alu_overflow)
+    .o_overflow(alu_overflow),
+    .o_negative(alu_negative),
+    .o_zero(alu_zero)
 );
 
 always_comb begin

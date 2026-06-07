@@ -54,6 +54,11 @@ localparam OPCODE_TYPE_LDX = 8'b101???10;
 localparam OPCODE_TYPE_DEC = 8'b110???10;
 localparam OPCODE_TYPE_INC = 8'b111???10;
 
+// --- cc=11: undocumented load (LAX) — 8'b101_xxx_11 ---
+// Loads memory into BOTH A and X. Addressing mirrors LDX (zero page,Y and
+// absolute,Y for the indexed forms).
+localparam OPCODE_TYPE_LAX = 8'b101???11;
+
 // --- cc=00: Control group — 8'baaa_xxx_00 ---
 //
 //  bbb | Mode

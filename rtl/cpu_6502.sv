@@ -795,7 +795,9 @@ always @(negedge i_clk or negedge i_reset_n) begin
                     OPCODE_ALR:
                         register_acc <= {1'b0, alu_result[7:1]};
                     OPCODE_ARR:
-                        register_acc <= {status_carry, alu_result[7:1]};
+                        register_acc <= status_decimal
+                            ? arr_dec_result
+                            : {status_carry, alu_result[7:1]};
                     OPCODE_AXS:
                         register_x <= alu_result;
                     OPCODE_TYPE_ADC, OPCODE_TYPE_AND, OPCODE_TYPE_ORA,
@@ -952,10 +954,12 @@ always @(negedge i_clk or negedge i_reset_n) begin
             end
             OPCODE_ARR: begin
                 // AND then ROR: result = {oldC, (A&imm)[7:1]}. NMOS sets C from
-                // result bit6 (= (A&imm)[7]) and V from result bit6 ^ bit5.
+                // result bit6 (= (A&imm)[7]) and V from result bit6 ^ bit5. In
+                // decimal mode N/Z/V stay binary but C comes from the high-nibble
+                // BCD adjust.
                 status_negative <= status_carry;
                 status_zero <= {status_carry, alu_result[7:1]} == 0;
-                status_carry <= alu_result[7];
+                status_carry <= status_decimal ? arr_high_fix : alu_result[7];
                 status_overflow <= alu_result[7] ^ alu_result[6];
             end
             OPCODE_AXS: begin
@@ -1274,6 +1278,20 @@ cpu_6502_alu alu (
     .o_negative(alu_negative),
     .o_zero(alu_zero)
 );
+
+// NMOS decimal-mode ARR fixup. ARR ANDs A with the immediate (alu_result),
+// rotates right through carry to form the binary result arr_bin, then applies a
+// BCD correction to the stored byte. N/Z/V still come from arr_bin; C comes from
+// the high-nibble adjust. t is the pre-rotate AND value (alu_result).
+wire [7:0] arr_bin = {status_carry, alu_result[7:1]};
+wire arr_low_fix  = (alu_result[3:0] + {4'b0, alu_result[0]}) > 5'd5;
+wire arr_high_fix = (alu_result[7:4] + {4'b0, alu_result[4]}) > 5'd5;
+wire [7:0] arr_after_low = arr_low_fix
+    ? {arr_bin[7:4], arr_bin[3:0] + 4'h6}
+    : arr_bin;
+wire [7:0] arr_dec_result = arr_high_fix
+    ? arr_after_low + 8'h60
+    : arr_after_low;
 
 always_comb begin
     case (i_debug_sel)

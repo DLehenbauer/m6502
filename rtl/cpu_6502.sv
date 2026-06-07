@@ -595,7 +595,9 @@ always @(negedge i_clk or negedge i_reset_n) begin
                         else begin
                             priority casez (opcode)
                             OPCODE_TYPE_INC, OPCODE_TYPE_DEC, OPCODE_TYPE_ROR, OPCODE_TYPE_ROL, OPCODE_TYPE_ASL,
-                            OPCODE_TYPE_LSR:
+                            OPCODE_TYPE_LSR,
+                            OPCODE_TYPE_SLO, OPCODE_TYPE_RLA, OPCODE_TYPE_SRE,
+                            OPCODE_TYPE_RRA, OPCODE_TYPE_DCP, OPCODE_TYPE_ISB:
                                 operation <= OP_ABSOLUTE_PAGE_CROSS;
                             default: begin
                                 current_microinstruction <= next_active_microinstruction;

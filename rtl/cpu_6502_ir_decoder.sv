@@ -21,6 +21,20 @@ always_comb begin
     8'h1A, 8'h3A, 8'h5A, 8'h7A, 8'hDA, 8'hFA:
         o_operand_type = IMPLIED;
 
+    // Undocumented multi-byte NOPs: read the operand/effective address and
+    // discard. Listed before the documented type patterns they collide with
+    // (STA/STX/STY/INC/DEC/BIT/CPY/CPX) so priority decode wins.
+    8'h80, 8'h82, 8'h89, 8'hC2, 8'hE2:
+        o_operand_type = IMMEDIATE;
+    8'h04, 8'h44, 8'h64:
+        o_operand_type = ZP;
+    8'h14, 8'h34, 8'h54, 8'h74, 8'hD4, 8'hF4:
+        o_operand_type = ZP_X;
+    8'h0C:
+        o_operand_type = ABSOLUTE;
+    8'h1C, 8'h3C, 8'h5C, 8'h7C, 8'hDC, 8'hFC:
+        o_operand_type = ABSOLUTE_X;
+
     OPCODE_TYPE_BRANCH:
         o_operand_type = RELATIVE;
 

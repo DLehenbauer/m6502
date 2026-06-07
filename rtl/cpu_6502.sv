@@ -788,6 +788,15 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 status_interrupt <= 1;
 
             priority casez (opcode)
+            // Undocumented multi-byte NOPs read and discard: no flag effects.
+            // Listed first so the ones that share a pattern with BIT/CPY/CPX
+            // do not commit those flags.
+            8'h80, 8'h82, 8'h89, 8'hC2, 8'hE2,
+            8'h04, 8'h44, 8'h64,
+            8'h14, 8'h34, 8'h54, 8'h74, 8'hD4, 8'hF4,
+            8'h0C,
+            8'h1C, 8'h3C, 8'h5C, 8'h7C, 8'hDC, 8'hFC: begin
+            end
             OPCODE_TYPE_BRANCH: begin
             end
             OPCODE_JSR: begin

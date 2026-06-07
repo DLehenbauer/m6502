@@ -40,6 +40,19 @@ always_comb begin
             default: ;
             endcase
         end
+        // Undocumented multi-byte NOPs read like a load but discard the value.
+        8'h80, 8'h82, 8'h89, 8'hC2, 8'hE2,
+        8'h04, 8'h44, 8'h64,
+        8'h14, 8'h34, 8'h54, 8'h74, 8'hD4, 8'hF4,
+        8'h0C,
+        8'h1C, 8'h3C, 8'h5C, 8'h7C, 8'hDC, 8'hFC: begin
+            case (i_current_microinstruction)
+            START: o_next_microinstruction = LOAD;
+            LOAD: o_next_microinstruction = MICRO_EXECUTE;
+            MICRO_EXECUTE: o_next_microinstruction = START;
+            default: ;
+            endcase
+        end
         OPCODE_PLA, OPCODE_PLP: begin
             case (i_current_microinstruction)
             START: o_next_microinstruction = POP_STACK;

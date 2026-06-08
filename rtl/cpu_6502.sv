@@ -831,14 +831,27 @@ always @(negedge i_clk or negedge i_reset_n) begin
             // excluded by !handle_irq).
             // IRQ is level-sensitive, sampled through the synchronizer so
             // recognition is delayed relative to the pin.
+            //
+            // Taken-branch poll alignment: a taken branch runs an extra execute
+            // cycle (the MAYBE_BRANCH target presentation, where next_active is
+            // already START). NMOS does not poll interrupts on that cycle, so an
+            // interrupt that arrives during a taken branch is NOT recognized at
+            // the branch target; it waits one more instruction. Suppress
+            // recognition on the taken-branch execute cycle. The level-sensitive
+            // IRQ re-checks the pin and the latched pending_nmi survives, so a
+            // still-asserted source re-arms at/after the target. branch_taken is
+            // nonzero only for branch opcodes, so this never affects other ops;
+            // not-taken branches poll normally.
             if (next_active_microinstruction == START && !irq_n_sync2 && !status_interrupt
                 && !handle_irq && !handle_nmi
-                && !(active_microinstruction == MICRO_EXECUTE && opcode == OPCODE_BRK)) begin
+                && !(active_microinstruction == MICRO_EXECUTE && opcode == OPCODE_BRK)
+                && !(branch_taken && active_microinstruction == MICRO_EXECUTE)) begin
                 handle_irq <= 1;
             end
             else if (next_active_microinstruction == START && (pending_nmi || nmi_edge_now)
                 && !handle_irq && !handle_nmi && !init
-                && !(active_microinstruction == MICRO_EXECUTE && opcode == OPCODE_BRK)) begin
+                && !(active_microinstruction == MICRO_EXECUTE && opcode == OPCODE_BRK)
+                && !(branch_taken && active_microinstruction == MICRO_EXECUTE)) begin
                 handle_irq <= 1;
                 handle_nmi <= 1;
                 pending_nmi <= 0;

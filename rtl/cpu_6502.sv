@@ -106,7 +106,7 @@ reg first_microinstruction;
 // handle_irq/handle_nmi.
 assign o_sync = first_microinstruction;
 
-microinstruction_t current_microinstruction, prev_mi;
+microinstruction_t current_microinstruction;
 reg [7:0] current_instruction;
 always_comb begin
     current_instruction = first_microinstruction ? i_bus_data : opcode;
@@ -275,7 +275,6 @@ always @(negedge i_clk or negedge i_reset_n) begin
 
         if (seq_advance) begin
             first_microinstruction <= 0;
-            prev_mi <= active_microinstruction;
             o_rw <= 0;
 
             if (handle_irq || handle_nmi) begin
@@ -1100,7 +1099,7 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 status_carry <= alu_result[7];
             end
             OPCODE_XAA: begin
-                status_negative <= (register_x & i_bus_data) >> 7;
+                status_negative <= register_x[7] & i_bus_data[7];
                 status_zero <= (register_x & i_bus_data) == 0;
             end
             OPCODE_ALR: begin

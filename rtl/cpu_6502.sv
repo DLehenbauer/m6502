@@ -146,13 +146,19 @@ always_comb begin
     end
 end
 
-// NMI edge that synchronizes exactly on the LOAD_VECTOR cycle of an
-// in-flight IRQ or BRK entry: too late for pending_nmi (registered the
-// next edge) yet it must still steer the vector this cycle. Drives both
-// the handle_nmi latch and the LOAD_VECTOR address mux. Gated on
-// !handle_nmi so an edge already consumed by the push-cycle hijack path
-// does not re-fire.
-wire nmi_load_vector_hijack = nmi_edge_now && !handle_nmi
+// NMI edge recognized at the LOAD_VECTOR cycle of an in-flight IRQ or BRK
+// entry. It must steer the vector to $FFFA this cycle without disturbing the
+// already-pushed status byte (BRK keeps B=1). Two arrival timings land here:
+//   - the edge synchronizes exactly on LOAD_VECTOR: visible only as the
+//     combinational nmi_edge_now (pending_nmi registers it a cycle later);
+//   - the edge arrived one cycle earlier (around WRITE_SR): by LOAD_VECTOR it
+//     has registered into pending_nmi but the push-cycle hijack window has
+//     already closed.
+// Accept either so the whole hijack regime (edge through WRITE_SR) steers the
+// vector. handle_nmi is set from this signal at LOAD_VECTOR, i.e. AFTER the SR
+// push, so the BRK push image is unaffected. Gated on !handle_nmi so an edge
+// already consumed by the push-cycle path does not re-fire.
+wire nmi_load_vector_hijack = (nmi_edge_now || pending_nmi) && !handle_nmi
     && (handle_irq || opcode == OPCODE_BRK)
     && active_microinstruction == LOAD_VECTOR;
 
@@ -830,7 +836,9 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 && !(active_microinstruction == MICRO_EXECUTE && opcode == OPCODE_BRK)) begin
                 handle_irq <= 1;
             end
-            else if (next_active_microinstruction == START && (pending_nmi || nmi_edge_now) && !handle_irq && !handle_nmi && !init) begin
+            else if (next_active_microinstruction == START && (pending_nmi || nmi_edge_now)
+                && !handle_irq && !handle_nmi && !init
+                && !(active_microinstruction == MICRO_EXECUTE && opcode == OPCODE_BRK)) begin
                 handle_irq <= 1;
                 handle_nmi <= 1;
                 pending_nmi <= 0;
@@ -858,6 +866,23 @@ always @(negedge i_clk or negedge i_reset_n) begin
             // path does not re-fire.
             else if (nmi_load_vector_hijack) begin
                 handle_nmi <= 1;
+                pending_nmi <= 0;
+            end
+            // ABSORBED regime: an NMI edge that arrives during BRK's
+            // vector-acknowledge tail (READ_VECTOR_HI / MICRO_EXECUTE) is too
+            // late to steer the vector (LOAD_VECTOR has passed) but is consumed
+            // by the in-progress BRK sequence on NMOS. BRK completes through the
+            // $FFFE vector and the edge is NOT separately serviced: clear
+            // pending_nmi without setting handle_nmi so it neither hijacks nor
+            // defers. An edge that lands one cycle later (the handler's first
+            // instruction boundary) is not in this window, so it survives as a
+            // normal deferred NMI. The combinational nmi_edge_now is included so
+            // an edge synchronizing exactly on these cycles is consumed too; this
+            // clear runs after the top-of-block pending_nmi set, so it wins.
+            else if ((pending_nmi || nmi_edge_now) && !handle_nmi
+                && opcode == OPCODE_BRK
+                && (active_microinstruction == READ_VECTOR_HI
+                    || active_microinstruction == MICRO_EXECUTE)) begin
                 pending_nmi <= 0;
             end
         end

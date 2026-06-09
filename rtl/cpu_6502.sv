@@ -35,7 +35,13 @@ localparam RESET_VECTOR = 16'hfffc;
 localparam NMI_VECTOR = 16'hfffa;
 localparam IRQ_VECTOR = 16'hfffe;
 
-localparam INIT_CYCLES = 6;
+// Reset settle-spin length. The vector-fetch reset path now walks the BRK
+// frame (PUSH_PCH/PUSH_PCL/WRITE_SR/LOAD_VECTOR, four extra slots before the
+// vector read), so it needs only 2 settle cycles to reach the first opcode
+// fetch at the same cycle as before. The START_PC_ENABLED bring-up shortcut
+// branches straight to LOAD_INITIAL_PC at init_rdy and does NOT walk the
+// frame, so it keeps the original 6-cycle settle.
+localparam INIT_CYCLES = START_PC_ENABLED ? 6 : 2;
 
 typedef enum logic [3:0] {
     INIT = 0,
@@ -57,6 +63,32 @@ reg status_negative, status_overflow,
     status_carry;
 
 reg [7:0] register_x, register_y, register_acc, register_sp;
+
+// Power-on state. RESET does not load the register file (it is a read-only
+// BRK frame that only decrements S and forces I), so the post-reset values
+// come from power-on, and a warm reset preserves the running values. There is
+// no async-reset clobber of these registers. An `initial` block (not
+// declaration initializers) keeps Verilator PROCASSINIT lint quiet.
+//
+// START_PC_ENABLED is the non-silicon FPGA bring-up mode: it loads PC from the
+// fixed START_PC instead of fetching the reset vector, and its consumers expect
+// a deterministic all-zero power-on. The silicon-faithful path (vector reset)
+// instead seeds the Perfect6502 NMOS power-on residue the conformance tests pin
+// (X=$C0, S=$C0 pre-decrement so the three reset dummy stack reads settle S to
+// $BD; A=$00, Y=$00; I and Z set).
+initial begin
+    register_acc = 8'h00;
+    register_x   = START_PC_ENABLED ? 8'h00 : 8'hC0;
+    register_y   = 8'h00;
+    register_sp  = START_PC_ENABLED ? 8'h00 : 8'hC0;
+    status_negative  = 1'b0;
+    status_overflow  = 1'b0;
+    status_decimal   = 1'b0;
+    status_interrupt = START_PC_ENABLED ? 1'b0 : 1'b1;
+    status_zero      = START_PC_ENABLED ? 1'b0 : 1'b1;
+    status_carry     = 1'b0;
+end
+
 reg [15:0] effective_address;
 wire [7:0] effective_address_lo, effective_address_hi;
 reg effective_address_lo_carry;
@@ -252,7 +284,12 @@ always @(negedge i_clk or negedge i_reset_n) begin
             end
 
             case (active_microinstruction)
-            PUSH_PCH, PUSH_PCL, WRITE_SR, ALU_MODIFY, WRITE: o_rw <= 0;
+            // RESET (init) demotes the three BRK push slots to dummy READS
+            // (the silicon's DORES R/W override), so S still decrements three
+            // times but nothing is written. A real BRK/IRQ/NMI (init=0) keeps
+            // the writes.
+            PUSH_PCH, PUSH_PCL, WRITE_SR: o_rw <= init ? 1'b1 : 1'b0;
+            ALU_MODIFY, WRITE: o_rw <= 0;
             default: o_rw <= 1;
             endcase
 
@@ -291,8 +328,14 @@ always @(negedge i_clk or negedge i_reset_n) begin
                         current_microinstruction <= LOAD_INITIAL_PC;
                         o_bus_addr <= START_PC;
                     end else begin
-                        o_bus_addr <= RESET_VECTOR;
-                        current_microinstruction <= READ_VECTOR_HI;
+                        // Enter the read-only BRK frame: walk PUSH_PCH ->
+                        // PUSH_PCL -> WRITE_SR (three dummy stack reads that
+                        // decrement S by three) -> LOAD_VECTOR -> READ_VECTOR_HI.
+                        // Do not pre-present a stack address; the slot handlers
+                        // present {1,S}/{1,S-1}/{1,S-2}. init holds through the
+                        // sequence (cleared when next_active==START), gating the
+                        // o_rw reads and the LOAD_VECTOR reset-vector select.
+                        current_microinstruction <= PUSH_PCH;
                         init <= 1;
                     end
                 end
@@ -367,7 +410,11 @@ always @(negedge i_clk or negedge i_reset_n) begin
             end
             else if (active_microinstruction == LOAD_VECTOR) begin
                 current_microinstruction <= next_active_microinstruction;
-                o_bus_addr <= handle_nmi ? NMI_VECTOR : IRQ_VECTOR;
+                // RESET (init) selects the reset vector $FFFC; the IRQ/NMI
+                // entries select their own vectors. Reset reaches LOAD_VECTOR
+                // via the BRK frame now, so the vector source must be selected
+                // here (the old direct init jump pre-loaded $FFFC instead).
+                o_bus_addr <= init ? RESET_VECTOR : (handle_nmi ? NMI_VECTOR : IRQ_VECTOR);
             end
             else if (active_microinstruction == MAYBE_BRANCH) begin
                 if (first_microinstruction) begin
@@ -580,11 +627,19 @@ always @(negedge i_clk or negedge i_reset_n) begin
     end
 end
 
-always @(negedge i_clk or negedge i_reset_n) begin
-    if (!i_reset_n) begin
+always @(negedge i_clk) begin
+    // START_PC_ENABLED (FPGA bring-up) zeros the register file on reset; the
+    // native harness relies on it to clear state between cases. It clears at
+    // init_rdy (reset-sequence completion, reached on every reset) so this
+    // synchronous block never references the async i_reset_n. The silicon-
+    // faithful path (vector reset) does NOT load the register file: reset is a
+    // read-only BRK frame that only decrements S (PUSH_PCH/PUSH_PCL/WRITE_SR)
+    // and leaves A/X/Y untouched, preserving the running values (warm) or the
+    // power-on residue seeded in the initial block (cold).
+    if (START_PC_ENABLED && init_rdy) begin
         register_acc <= 0;
-        register_y <= 0;
         register_x <= 0;
+        register_y <= 0;
         register_sp <= 0;
     end
     else begin
@@ -634,22 +689,22 @@ always @(negedge i_clk or negedge i_reset_n) begin
     end
 end
 
-always @(negedge i_clk or negedge i_reset_n) begin
-    if (!i_reset_n) begin
-        status_negative <= 0;
-        status_decimal <= 0;
-        status_overflow <= 0;
-        status_carry <= 0;
-        status_zero <= 0;
-        status_interrupt <= 0;
-    end else begin
+always @(negedge i_clk) begin
+    begin
         if (init_rdy) begin
-            status_negative <= 0;
-            status_overflow <= 0;
-            status_decimal <= 0;
+            // RESET forces the I flag (interrupts masked out of reset).
+            // N/V/D/Z/C self-hold on the silicon path: warm reset preserves the
+            // running flags, and the cold residue (Z set) comes from the initial
+            // power-on seed. START_PC_ENABLED (bring-up) additionally clears
+            // N/V/D/Z/C so the native harness sees a clean P between cases.
             status_interrupt <= 1;
-            status_zero <= 0;
-            status_carry <= 0;
+            if (START_PC_ENABLED) begin
+                status_negative <= 0;
+                status_overflow <= 0;
+                status_decimal <= 0;
+                status_zero <= 0;
+                status_carry <= 0;
+            end
         end
         if (active_microinstruction == PULL_REGISTER && i_rdy) begin
             priority casez (opcode)

@@ -40,19 +40,19 @@ always_comb begin
         end
         OPCODE_PLA, OPCODE_PLP: begin
             case (i_current_microinstruction)
-            START: o_next_microinstruction = POP_STACK;
+            START: o_next_microinstruction = STACK_DUMMY_PC;
+            STACK_DUMMY_PC: o_next_microinstruction = POP_STACK;
             POP_STACK: o_next_microinstruction = PULL_REGISTER;
-            PULL_REGISTER: o_next_microinstruction = STALL;
-            STALL: o_next_microinstruction = MICRO_EXECUTE;
+            PULL_REGISTER: o_next_microinstruction = MICRO_EXECUTE;
             MICRO_EXECUTE: o_next_microinstruction = START;
             default: ;
             endcase
         end
         OPCODE_PHA, OPCODE_PHP: begin
             case (i_current_microinstruction)
-            START: o_next_microinstruction = PUSH_STACK;
-            PUSH_STACK: o_next_microinstruction = WRITE;
-            WRITE: o_next_microinstruction = MICRO_EXECUTE;
+            START: o_next_microinstruction = STACK_DUMMY_PC;
+            STACK_DUMMY_PC: o_next_microinstruction = PUSH_STACK;
+            PUSH_STACK: o_next_microinstruction = MICRO_EXECUTE;
             MICRO_EXECUTE: o_next_microinstruction = START;
             default: ;
             endcase
@@ -112,24 +112,24 @@ always_comb begin
         end
         OPCODE_RTS: begin
             case (i_current_microinstruction)
-            START: o_next_microinstruction = POP_STACK;
+            START: o_next_microinstruction = STACK_DUMMY_PC;
+            STACK_DUMMY_PC: o_next_microinstruction = POP_STACK;
             POP_STACK: o_next_microinstruction = RESTORE_STACK;
             RESTORE_STACK: o_next_microinstruction = RESTORE_STACK2;
             RESTORE_STACK2: o_next_microinstruction = PC_INC;
-            PC_INC: o_next_microinstruction = STALL;
-            STALL: o_next_microinstruction = MICRO_EXECUTE;
+            PC_INC: o_next_microinstruction = MICRO_EXECUTE;
             MICRO_EXECUTE: o_next_microinstruction = START;
             default: ;
             endcase
         end
         OPCODE_RTI: begin
             case (i_current_microinstruction)
-            START: o_next_microinstruction = POP_STACK;
+            START: o_next_microinstruction = STACK_DUMMY_PC;
+            STACK_DUMMY_PC: o_next_microinstruction = POP_STACK;
             POP_STACK: o_next_microinstruction = PULL_REGISTER;
             PULL_REGISTER: o_next_microinstruction = PULL_PCL;
             PULL_PCL: o_next_microinstruction = PULL_PCH;
-            PULL_PCH: o_next_microinstruction = STALL;
-            STALL: o_next_microinstruction = MICRO_EXECUTE;
+            PULL_PCH: o_next_microinstruction = MICRO_EXECUTE;
             MICRO_EXECUTE: o_next_microinstruction = START;
             default: ;
             endcase

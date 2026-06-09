@@ -29,7 +29,12 @@ package cpu_6502_pkg;
         READ_ADL = 15, BUFFER_ADL = 16, PUSH_PCH = 17, PUSH_PCL = 18, READ_ADH = 19, PC_INC = 20,
         READ_PCL = 21, READ_PCH = 22, LOAD_PC_EFFECTIVE_LO = 23, LOAD_PC_EFFECTIVE_HI = 24,
         READ_EFFECTIVE_LO = 25, READ_EFFECTIVE_HI = 26, PULL_REGISTER = 27, WRITE_SR = 28,
-        READ_VECTOR_HI = 29, PULL_PCH = 30, PULL_PCL = 31, LOAD_VECTOR = 32
+        READ_VECTOR_HI = 29, PULL_PCH = 30, PULL_PCL = 31, LOAD_VECTOR = 32,
+        // Shared first post-fetch beat of every stack/return op (PHA/PHP/PLA/
+        // PLP/RTS/RTI): a dummy read at PC. The NMOS die reserves the cycle
+        // after the opcode fetch for this read (a predecode/PC side effect, not
+        // stack logic), so it must never inherit the next beat's stack address.
+        STACK_DUMMY_PC = 33
     } microinstruction_t;
 
 endpackage

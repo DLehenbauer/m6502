@@ -289,7 +289,7 @@ always @(negedge i_clk or negedge i_reset_n) begin
             // times but nothing is written. A real BRK/IRQ/NMI (init=0) keeps
             // the writes.
             PUSH_PCH, PUSH_PCL, WRITE_SR: o_rw <= init ? 1'b1 : 1'b0;
-            ALU_MODIFY, WRITE: o_rw <= 0;
+            PUSH_STACK, ALU_MODIFY, WRITE: o_rw <= 0;
             default: o_rw <= 1;
             endcase
 
@@ -340,13 +340,33 @@ always @(negedge i_clk or negedge i_reset_n) begin
                     end
                 end
             end
+            else if (active_microinstruction == STACK_DUMMY_PC) begin
+                // The shared first post-fetch beat of every stack/return op:
+                // a dummy read at PC. The opcode-fetch block already drove PC+1
+                // onto o_bus_addr, so leave it (do NOT touch o_bus_addr, S, or
+                // PC); just advance. This occupies the post-fetch cycle the die
+                // reserves for the PC dummy read, so the real stack beats that
+                // follow are no longer collapsed and drive their {1,S} address
+                // unconditionally.
+                current_microinstruction <= next_active_microinstruction;
+            end
             else if (active_microinstruction == NOP) begin
                 program_counter <= program_counter + 1;
                 o_bus_addr <= o_bus_addr + 1;
                 current_microinstruction <= next_active_microinstruction;
             end
             else if (active_microinstruction == STALL ||
-                    active_microinstruction == PULL_REGISTER || active_microinstruction == WRITE) begin
+                    active_microinstruction == WRITE) begin
+                current_microinstruction <= next_active_microinstruction;
+            end
+            else if (active_microinstruction == PULL_REGISTER) begin
+                // Value-read beat for PLA/PLP/RTI. POP_STACK already pointed the
+                // bus at the old-S dummy slot {1,S} and incremented S, so
+                // register_sp == old_S + 1 here: drive {1, register_sp} for the
+                // real pull read on the next cycle. The pulled byte is latched
+                // one cycle later (prev_mi == PULL_REGISTER) when it is on the
+                // bus.
+                o_bus_addr <= {8'b1, register_sp};
                 current_microinstruction <= next_active_microinstruction;
             end
             else if (active_microinstruction == READ_ADL) begin
@@ -363,8 +383,14 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 current_microinstruction <= next_active_microinstruction;
             end
             else if (active_microinstruction == PC_INC) begin
+                // RTS only: this beat reads PCH. Compose the return address from
+                // PCH (i_bus_data) and the PCL latched at RESTORE_STACK2, drive
+                // it as the trailing dummy read (the RTS/5 cycle reads the
+                // pulled PC), and set PC to pulled+1 so the next fetch lands on
+                // the instruction after the JSR.
+                o_bus_addr <= {i_bus_data, effective_address_lo};
+                program_counter <= {i_bus_data, effective_address_lo} + 16'b1;
                 current_microinstruction <= next_active_microinstruction;
-                program_counter <= program_counter + 1;
             end
             else if (active_microinstruction == READ_PCL) begin
                 current_microinstruction <= next_active_microinstruction;
@@ -465,6 +491,12 @@ always @(negedge i_clk or negedge i_reset_n) begin
                     end
                     OPCODE_RTS: begin
                         o_bus_addr <= program_counter;
+                    end
+                    OPCODE_RTI: begin
+                        // PCH is on the bus this cycle; program_counter gets its
+                        // high half from the prev_mi == PULL_PCH path below, so
+                        // drive the same composed address for the next fetch.
+                        o_bus_addr <= {i_bus_data, program_counter[7:0]};
                     end
                     OPCODE_BRK: begin
                         program_counter <= {i_bus_data, program_counter[7:0]};
@@ -577,28 +609,34 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 end
             end
             else if (active_microinstruction == POP_STACK) begin
-                o_bus_addr <= {8'b1, register_sp + 8'b1};
+                // First stack beat of PLA/PLP/RTS/RTI: drive the old-S dummy
+                // stack read at {1, S}. register_sp is still the pre-op S here
+                // (the +1 it latches this beat is for the next, real read).
+                o_bus_addr <= {8'b1, register_sp};
                 current_microinstruction <= next_active_microinstruction;
             end
             else if (active_microinstruction == RESTORE_STACK2) begin
-                effective_address <= {i_bus_data, effective_address_lo};
-                if (opcode == OPCODE_RTS)
-                    program_counter <= {i_bus_data, effective_address_lo};
+                // RTS: this beat reads PCL from {1, S}. Latch it as the low half
+                // of the return address and point the bus at PCH ({1, S+1}); S
+                // increments this beat (register block), so register_sp+1 is the
+                // PCH slot. PC is composed at PC_INC from PCH and this PCL.
+                effective_address <= {8'b0, i_bus_data};
+                o_bus_addr <= {8'b1, register_sp + 8'b1};
                 current_microinstruction <= next_active_microinstruction;
             end
             else if (active_microinstruction == RESTORE_STACK) begin
-                effective_address <= {8'b0, i_bus_data};
-                if (next_active_microinstruction == RESTORE_STACK2)
-                    o_bus_addr <= {8'b1, o_bus_addr[7:0] + 8'b1};
+                // RTS: this beat reads the old-S dummy byte (discarded) and
+                // points the bus at PCL ({1, register_sp}; register_sp == old_S+1
+                // after POP_STACK).
+                o_bus_addr <= {8'b1, register_sp};
                 current_microinstruction <= next_active_microinstruction;
             end
             else if (active_microinstruction == PUSH_STACK) begin
+                // PHA/PHP write beat (only these opcodes reach PUSH_STACK): drive
+                // the stack write target {1, S}; the register block decrements S
+                // and the o_rw case asserts the write.
                 o_bus_addr <= {8'b1, register_sp};
                 current_microinstruction <= next_active_microinstruction;
-
-                if (opcode == OPCODE_JSR) begin
-                    effective_address <= {i_bus_data, effective_address_lo};
-                end
             end
             else if (active_microinstruction == ALU_MODIFY) begin
                 current_microinstruction <= next_active_microinstruction;
@@ -649,14 +687,6 @@ always @(negedge i_clk) begin
                 PUSH_STACK, PUSH_PCL, PUSH_PCH, WRITE_SR: register_sp <= register_sp - 8'b1;
                 PULL_PCL, PULL_PCH: register_sp <= register_sp + 8'b1;
                 RESTORE_STACK2: register_sp <= register_sp + 8'b1;
-                PULL_REGISTER: begin
-                    priority casez (opcode)
-                    OPCODE_PLA: begin
-                        register_acc <= i_bus_data;
-                    end
-                    default: ;
-                    endcase
-                end
                 MICRO_EXECUTE: begin
                     priority casez (opcode)
                     OPCODE_PLP, OPCODE_PLA: begin
@@ -685,6 +715,11 @@ always @(negedge i_clk) begin
                 end
                 default: ;
             endcase
+            // PLA latches the pulled accumulator one cycle after PULL_REGISTER,
+            // when the value byte (from {1, old_S+1}) is on the bus. The
+            // PULL_REGISTER beat itself reads the old-S dummy.
+            if (prev_mi == PULL_REGISTER && opcode == OPCODE_PLA)
+                register_acc <= i_bus_data;
         end
     end
 end
@@ -706,7 +741,10 @@ always @(negedge i_clk) begin
                 status_carry <= 0;
             end
         end
-        if (active_microinstruction == PULL_REGISTER && i_rdy) begin
+        if (prev_mi == PULL_REGISTER && i_rdy) begin
+            // The pulled byte is on the bus the cycle after PULL_REGISTER.
+            // PLP/RTI restore the status register from it; PLA sets N/Z from the
+            // pulled accumulator value.
             priority casez (opcode)
             OPCODE_PLP, OPCODE_RTI: begin
                 status_negative <= i_bus_data[7];
@@ -715,6 +753,10 @@ always @(negedge i_clk) begin
                 status_interrupt <= i_bus_data[2];
                 status_zero <= i_bus_data[1];
                 status_carry <= i_bus_data[0];
+            end
+            OPCODE_PLA: begin
+                status_negative <= i_bus_data[7];
+                status_zero <= i_bus_data == 0;
             end
             default: ;
             endcase
@@ -726,12 +768,8 @@ always @(negedge i_clk) begin
             priority casez (opcode)
             OPCODE_TYPE_BRANCH: begin
             end
-            OPCODE_PLP, OPCODE_JSR: begin
-                // no updates
-            end
-            OPCODE_PLA: begin
-                status_negative <= register_acc[7];
-                status_zero <= register_acc == 0;
+            OPCODE_PLP, OPCODE_PLA, OPCODE_JSR: begin
+                // no updates (PLA N/Z and PLP P restore at prev_mi==PULL_REGISTER)
             end
             OPCODE_SEC: status_carry <= 1;
             OPCODE_CLC: status_carry <= 0;

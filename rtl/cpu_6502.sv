@@ -938,7 +938,19 @@ always @(negedge i_clk) begin
             endcase
         end
 
-        if (trigger_overflow)
+        // V is a single status node with prioritized controls (Breaking
+        // 6502, flags.md): the CLV clear line (0/V) outranks the SO set
+        // line (1/V), which outranks the ADC/SBC/BIT/PLP/RTI load lines
+        // (AVR/V, DB/V). The load writes above run before this SO apply,
+        // so statement order already encodes set-over-load. The remaining
+        // rule is clear-over-set: a coincident SO falling edge must not
+        // re-set V while CLV clears it. 0/V has a single decode source
+        // (CLV), so opcode != OPCODE_CLV is the faithful test for "the 0/V
+        // clear line is not asserted". This single-flop SO detector
+        // suppresses across CLV's whole window rather than only the die's
+        // narrow PHI2 clear aperture; the difference is untested and
+        // accepted (see CL8 design.md).
+        if (trigger_overflow && opcode != OPCODE_CLV)
             status_overflow <= 1;
     end
 end

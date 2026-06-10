@@ -781,6 +781,17 @@ always @(negedge i_clk) begin
                     OPCODE_INX, OPCODE_DEX: register_x <= alu_result;
                     OPCODE_INY, OPCODE_DEY: register_y <= alu_result;
                     OPCODE_ASL_ACC, OPCODE_LSR_ACC, OPCODE_ROL_ACC, OPCODE_ROR_ACC: register_acc <= alu_result;
+                    OPCODE_CLC, OPCODE_SEC, OPCODE_CLI, OPCODE_SEI, OPCODE_CLV,
+                    OPCODE_CLD, OPCODE_SED, OPCODE_NOP: begin
+                        // Implied flag/control ops write no register-file entry;
+                        // on the die they assert only their flag-control line.
+                        // List them ahead of the broad load opcode-bit patterns
+                        // so an implied op can never inherit a memory-group or
+                        // LDY-pattern (101???00) data write. Today only CLV
+                        // ($B8 = 101_110_00) legally aliases a load pattern; the
+                        // rest are an intentional invariant lock so a later mask
+                        // change cannot silently re-open the hole.
+                    end
                     OPCODE_TYPE_LDA: register_acc <= i_bus_data;
                     OPCODE_TYPE_LDX: register_x <= i_bus_data;
                     OPCODE_TYPE_LDY: register_y <= i_bus_data;

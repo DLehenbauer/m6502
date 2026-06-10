@@ -429,7 +429,15 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 current_microinstruction <= next_active_microinstruction;
                 o_bus_addr <= {i_bus_data, effective_address_lo};
             end
-            else if (active_microinstruction == LOAD_PC_EFFECTIVE_HI || active_microinstruction == READ_VECTOR_HI) begin
+            else if (active_microinstruction == LOAD_PC_EFFECTIVE_HI) begin
+                // JMP (): NMOS reads the pointer-high byte WITHOUT carrying out
+                // of the low byte (the page-boundary bug). Increment only ADL;
+                // hold ADH. So JMP ($05FF) reads PCH from $0500, not $0600.
+                current_microinstruction <= next_active_microinstruction;
+                program_counter <= {8'b0, i_bus_data};
+                o_bus_addr <= {o_bus_addr[15:8], o_bus_addr[7:0] + 8'b1};
+            end
+            else if (active_microinstruction == READ_VECTOR_HI) begin
                 current_microinstruction <= next_active_microinstruction;
                 program_counter <= {8'b0, i_bus_data};
                 o_bus_addr <= o_bus_addr + 1;
@@ -453,11 +461,27 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 end
                 else if (operation == OP_CALCULATE_BRANCH_OFFSET) begin
                     if (branch_taken) begin
-                        if ((alu_carry_out && !i_bus_data[7]) || (!alu_carry_out && i_bus_data[7]))
+                        if ((alu_carry_out && !i_bus_data[7]) || (!alu_carry_out && i_bus_data[7])) begin
+                            // Page cross. NMOS spends an extra internal cycle to
+                            // fix PCH. The offset is only on i_bus_data this
+                            // cycle, so compute both PC forms now: present the
+                            // post-operand PC, stash the wrong-PCH target in
+                            // effective_address for the next cycle, and load the
+                            // fixed PC into program_counter for the SYNC fetch two
+                            // cycles later.
                             operation <= OP_BRANCH_PAGE_CROSS;
+                            o_bus_addr <= program_counter;
+                            effective_address <= {program_counter[15:8], alu_result};
+                            program_counter <= {program_counter[15:8] + (i_bus_data[7] ? 8'hff : 8'h01), alu_result};
+                        end
                         else begin
+                            // No page cross. NMOS presents the post-operand PC for
+                            // one internal cycle (offset add), then fetches the
+                            // target as the next opcode. Hold the current PC on the
+                            // bus here; the MICRO_EXECUTE->START transition presents
+                            // the branch target for the SYNC fetch.
                             program_counter <= {program_counter[15:8], alu_result};
-                            o_bus_addr <= {program_counter[15:8], alu_result};
+                            o_bus_addr <= program_counter;
                             current_microinstruction <= next_active_microinstruction;
                         end
                     end
@@ -466,8 +490,10 @@ always @(negedge i_clk or negedge i_reset_n) begin
                     end
                 end
                 else if (operation == OP_BRANCH_PAGE_CROSS) begin
-                        program_counter <= {program_counter[15:8] + (i_bus_data[7] ? 8'hff : 8'h01), alu_result};
-                        o_bus_addr <= {program_counter[15:8] + (i_bus_data[7] ? 8'hff : 8'h01), alu_result};
+                        // Present the wrong-PCH target stashed last cycle; the
+                        // fixed PC is already in program_counter for the SYNC
+                        // opcode fetch the MICRO_EXECUTE->START step drives.
+                        o_bus_addr <= effective_address;
                         current_microinstruction <= next_active_microinstruction;
                 end
             end
@@ -541,7 +567,19 @@ always @(negedge i_clk or negedge i_reset_n) begin
                                 o_bus_addr <= {8'b0, i_bus_data};
                                 operation <= OP_ABSOLUTE_LO;
                             end
-                            INDEX_X_INDIRECT, ZP_X, ZP_Y: operation <= OP_LOAD_ZP_INDEXED;
+                            INDEX_X_INDIRECT, ZP_X, ZP_Y: begin
+                                // Dummy read at the UNINDEXED zero-page operand
+                                // {00, operand}, then the indexed read. The index
+                                // is added here while the operand is live on the
+                                // bus; the 8-bit sum wraps in page zero. Latch it
+                                // so OP_LOAD_ZP_INDEXED presents it (the indexed
+                                // cycle's i_bus_data is the dummy byte, not the
+                                // operand).
+                                o_bus_addr <= {8'b0, i_bus_data};
+                                effective_address <= {8'b0, i_bus_data +
+                                    ((addressing_mode == ZP_Y) ? register_y : register_x)};
+                                operation <= OP_LOAD_ZP_INDEXED;
+                            end
                             // invalid opcode, continue
                             default: begin
                                 current_microinstruction <= next_active_microinstruction;
@@ -549,7 +587,10 @@ always @(negedge i_clk or negedge i_reset_n) begin
                         endcase
                     end
                     else if (operation == OP_LOAD_ZP_INDEXED) begin
-                        o_bus_addr <= {8'b0, alu_result};
+                        // Present the indexed zero-page address latched at
+                        // OP_LOAD_ZP (i_bus_data is the dummy byte now, so do not
+                        // recompute the index here).
+                        o_bus_addr <= {8'b0, effective_address[7:0]};
                         if (addressing_mode == INDEX_X_INDIRECT) begin
                             operation <= OP_ABSOLUTE_LO;
                         end
@@ -564,7 +605,13 @@ always @(negedge i_clk or negedge i_reset_n) begin
                             program_counter <= program_counter + 1;
 
                         effective_address <= {8'b0, i_bus_data};
-                        o_bus_addr <= o_bus_addr + 1;
+                        // Zero-page indirect ((zp,X)/(zp),Y) reads the pointer
+                        // high byte with an 8-bit increment that wraps in page
+                        // zero; absolute increments the full 16-bit pointer.
+                        if (addressing_mode == INDEX_X_INDIRECT || addressing_mode == INDEX_Y_INDIRECT)
+                            o_bus_addr <= {8'b0, o_bus_addr[7:0] + 8'b1};
+                        else
+                            o_bus_addr <= o_bus_addr + 1;
                         operation <= OP_ABSOLUTE_HI;
 
                         if (opcode == OPCODE_JMP_ABS || opcode == OPCODE_JSR)
@@ -578,7 +625,14 @@ always @(negedge i_clk or negedge i_reset_n) begin
                         if (opcode == OPCODE_JMP_IND) begin
                             operation <= OP_LOAD_INDIRECT_LO;
                         end
-                        else if (alu_carry_out || (active_microinstruction == STORE && addressing_mode != ABSOLUTE))
+                        else if (alu_carry_out || (active_microinstruction == STORE
+                                 && (addressing_mode == ABSOLUTE_X
+                                     || addressing_mode == ABSOLUTE_Y
+                                     || addressing_mode == INDEX_Y_INDIRECT)))
+                            // Post-indexed stores (abs,X / abs,Y / (zp),Y) always
+                            // take the corrected-address read cycle. (zp,X) is
+                            // pre-indexed and has no post-index page cross, so it
+                            // must NOT take it.
                             operation <= OP_ABSOLUTE_PAGE_CROSS;
                         else begin
                             priority casez (opcode)

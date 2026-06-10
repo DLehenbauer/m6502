@@ -157,8 +157,8 @@ always_comb begin
             case (i_current_microinstruction)
             START: o_next_microinstruction = LOAD;
             LOAD: o_next_microinstruction = ALU_MODIFY;
-            ALU_MODIFY: o_next_microinstruction = STALL;
-            STALL: o_next_microinstruction = MICRO_EXECUTE;
+            ALU_MODIFY: o_next_microinstruction = RMW_WRITE_NEW;
+            RMW_WRITE_NEW: o_next_microinstruction = MICRO_EXECUTE;
             MICRO_EXECUTE: o_next_microinstruction = START;
             default: ;
             endcase

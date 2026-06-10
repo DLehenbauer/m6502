@@ -97,6 +97,10 @@ assign effective_address_hi = effective_address[15:8];
 
 reg init;
 reg [7:0] opcode;
+// Staged NEW byte for a memory read-modify-write. The read latches the OLD
+// byte; ALU_MODIFY drives OLD and stages alu_result here; RMW_WRITE_NEW drives
+// this on the second (real) write beat.
+reg [7:0] rmw_new;
 
 reg [2:0] init_counter;
 reg [7:0] bus_data_write;
@@ -289,7 +293,7 @@ always @(negedge i_clk or negedge i_reset_n) begin
             // times but nothing is written. A real BRK/IRQ/NMI (init=0) keeps
             // the writes.
             PUSH_PCH, PUSH_PCL, WRITE_SR: o_rw <= init ? 1'b1 : 1'b0;
-            PUSH_STACK, ALU_MODIFY, WRITE: o_rw <= 0;
+            PUSH_STACK, ALU_MODIFY, WRITE, RMW_WRITE_NEW: o_rw <= 0;
             default: o_rw <= 1;
             endcase
 
@@ -637,8 +641,16 @@ always @(negedge i_clk or negedge i_reset_n) begin
                         else begin
                             priority casez (opcode)
                             OPCODE_TYPE_INC, OPCODE_TYPE_DEC, OPCODE_TYPE_ROR, OPCODE_TYPE_ROL, OPCODE_TYPE_ASL,
-                            OPCODE_TYPE_LSR:
-                                operation <= OP_ABSOLUTE_PAGE_CROSS;
+                            OPCODE_TYPE_LSR: begin
+                                // Post-indexed RMW (abs,X) always spends the
+                                // mandatory corrected-address read cycle. Plain
+                                // absolute has no post-index, so it reads once
+                                // and proceeds straight to the modify/writeback.
+                                if (addressing_mode == ABSOLUTE_X)
+                                    operation <= OP_ABSOLUTE_PAGE_CROSS;
+                                else
+                                    current_microinstruction <= next_active_microinstruction;
+                            end
                             default: begin
                                 current_microinstruction <= next_active_microinstruction;
                                 if (active_microinstruction == STORE)
@@ -693,8 +705,18 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 current_microinstruction <= next_active_microinstruction;
             end
             else if (active_microinstruction == ALU_MODIFY) begin
+                // RMW beat 2: drive the OLD (unmodified) byte for the dummy
+                // write and stage the NEW (modified) byte. The o_rw case already
+                // marks ALU_MODIFY a write, so the next cycle writes OLD; the
+                // RMW_WRITE_NEW beat then writes the staged NEW byte.
                 current_microinstruction <= next_active_microinstruction;
-                bus_data_write <= alu_result;
+                bus_data_write <= i_bus_data;
+                rmw_new        <= alu_result;
+            end
+            else if (active_microinstruction == RMW_WRITE_NEW) begin
+                // RMW beat 3: write the staged NEW byte to the same address.
+                current_microinstruction <= next_active_microinstruction;
+                bus_data_write <= rmw_new;
             end
 
             case (prev_mi)

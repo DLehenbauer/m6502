@@ -34,7 +34,14 @@ package cpu_6502_pkg;
         // PLP/RTS/RTI): a dummy read at PC. The NMOS die reserves the cycle
         // after the opcode fetch for this read (a predecode/PC side effect, not
         // stack logic), so it must never inherit the next beat's stack address.
-        STACK_DUMMY_PC = 33
+        STACK_DUMMY_PC = 33,
+        // Third beat of a memory read-modify-write: the WRITE of the modified
+        // (NEW) byte. The second beat (ALU_MODIFY) writes the unmodified (OLD)
+        // byte and stages the NEW byte in rmw_new; this state commits it. The
+        // bus intent (write, drive rmw_new) is carried by the STATE, not by an
+        // opcode test, so the illegal RMW+ALU combos (IL3) inherit both write
+        // beats unchanged.
+        RMW_WRITE_NEW = 34
     } microinstruction_t;
 
 endpackage

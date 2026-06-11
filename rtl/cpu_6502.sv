@@ -209,6 +209,24 @@ always @(posedge o_phi2 or negedge i_reset_n) begin
     end
 end
 
+// NMOS RDY read-hold with write-bypass. RDY is sampled on phi2 (the read
+// half-cycle, the same edge the SO detector uses) and the stall engages on
+// the FOLLOWING cycle: the bus/PC advance for the cycle being entered has
+// already committed, so that cycle's address appears on the bus and is then
+// held while the read repeats. A registered copy rdy_q gives the one-cycle
+// engage/release lag (the held read completes one cycle after RDY returns
+// high). RDY pauses reads only; write cycles bypass the stall and commit
+// (NMOS quirk), so the advance gate also passes when the current bus cycle
+// is a write (o_rw == 0).
+reg rdy_q;
+wire seq_advance = rdy_q || (o_rw == 1'b0);
+always @(posedge o_phi2 or negedge i_reset_n) begin
+    if (!i_reset_n)
+        rdy_q <= 1'b1;
+    else
+        rdy_q <= i_rdy;
+end
+
 reg nmi_n_sync, nmi_n_sync2, prev_nmi_n, pending_nmi;
 always @(negedge i_clk or negedge i_reset_n) begin
     if (!i_reset_n) begin
@@ -250,7 +268,7 @@ always @(negedge i_clk or negedge i_reset_n) begin
         if (prev_nmi_n && !nmi_n_sync2)
             pending_nmi <= 1;
 
-        if (i_rdy) begin
+        if (seq_advance) begin
             first_microinstruction <= 0;
             prev_mi <= active_microinstruction;
             o_rw <= 0;
@@ -758,7 +776,7 @@ always @(negedge i_clk) begin
         register_sp <= 0;
     end
     else begin
-        if (i_rdy) begin
+        if (seq_advance) begin
             case (active_microinstruction)
                 POP_STACK: register_sp <= register_sp + 8'b1;
                 PUSH_STACK, PUSH_PCL, PUSH_PCH, WRITE_SR: register_sp <= register_sp - 8'b1;
@@ -829,7 +847,7 @@ always @(negedge i_clk) begin
                 status_carry <= 0;
             end
         end
-        if (prev_mi == PULL_REGISTER && i_rdy) begin
+        if (prev_mi == PULL_REGISTER && seq_advance) begin
             // The pulled byte is on the bus the cycle after PULL_REGISTER.
             // PLP/RTI restore the status register from it; PLA sets N/Z from the
             // pulled accumulator value.
@@ -849,7 +867,7 @@ always @(negedge i_clk) begin
             default: ;
             endcase
         end
-        if (active_microinstruction == MICRO_EXECUTE && i_rdy) begin
+        if (active_microinstruction == MICRO_EXECUTE && seq_advance) begin
             if (handle_irq)
                 status_interrupt <= 1;
 
@@ -923,7 +941,7 @@ always @(negedge i_clk) begin
             end
             endcase
         end
-        else if (active_microinstruction == ALU_MODIFY && i_rdy) begin
+        else if (active_microinstruction == ALU_MODIFY && seq_advance) begin
             priority casez (opcode)
             OPCODE_TYPE_ASL, OPCODE_TYPE_LSR, OPCODE_TYPE_ROL, OPCODE_TYPE_ROR: begin
                 status_negative <= alu_result[7];

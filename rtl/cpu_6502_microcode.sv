@@ -35,10 +35,27 @@ always_comb begin
         OPCODE_SEC, OPCODE_CLC, OPCODE_SEI, OPCODE_CLI, OPCODE_TAX,
         OPCODE_TAY, OPCODE_TXA, OPCODE_TYA, OPCODE_TSX, OPCODE_TXS,
         OPCODE_INX, OPCODE_INY, OPCODE_DEY, OPCODE_DEX, OPCODE_CLD,
-        OPCODE_CLV, OPCODE_NOP, OPCODE_SED: begin
+        OPCODE_CLV, OPCODE_NOP, OPCODE_SED,
+        // Undocumented single-byte implied NOPs: two-cycle, like NOP.
+        8'h1A, 8'h3A, 8'h5A, 8'h7A, 8'hDA, 8'hFA: begin
             case (i_current_microinstruction)
             START: o_next_microinstruction = NOP;
             NOP: o_next_microinstruction = MICRO_EXECUTE;
+            MICRO_EXECUTE: o_next_microinstruction = START;
+            default: ;
+            endcase
+        end
+        // Undocumented multi-byte NOPs read like a load but discard the value.
+        // Listed before the documented STA/STX/STY/INC/DEC/BIT/CPY/CPX type
+        // patterns they collide with so priority decode routes them here.
+        8'h80, 8'h82, 8'h89, 8'hC2, 8'hE2,
+        8'h04, 8'h44, 8'h64,
+        8'h14, 8'h34, 8'h54, 8'h74, 8'hD4, 8'hF4,
+        8'h0C,
+        8'h1C, 8'h3C, 8'h5C, 8'h7C, 8'hDC, 8'hFC: begin
+            case (i_current_microinstruction)
+            START: o_next_microinstruction = LOAD;
+            LOAD: o_next_microinstruction = MICRO_EXECUTE;
             MICRO_EXECUTE: o_next_microinstruction = START;
             default: ;
             endcase

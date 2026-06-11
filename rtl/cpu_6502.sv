@@ -87,8 +87,9 @@ initial begin
     status_interrupt = START_PC_ENABLED ? 1'b0 : 1'b1;
     status_zero      = START_PC_ENABLED ? 1'b0 : 1'b1;
     status_carry     = 1'b0;
+    las_revert       = 1'b0;
+    las_old_s        = 8'h00;
 end
-
 reg [15:0] effective_address;
 wire [7:0] effective_address_lo, effective_address_hi;
 reg effective_address_lo_carry;
@@ -102,6 +103,11 @@ reg [7:0] opcode;
 // this on the second (real) write beat.
 reg [7:0] rmw_new;
 reg [1:0] jam_count;
+// LAS abs,Y: A=X=S=M&old_S are published together for one transient commit
+// cycle, then X and S revert to old_S (A keeps M&old_S). las_old_s saves the
+// pre-LAS stack pointer; las_revert fires the revert on the next edge.
+reg [7:0] las_old_s;
+reg las_revert;
 
 reg [2:0] init_counter;
 reg [7:0] bus_data_write;
@@ -323,6 +329,14 @@ always @(negedge i_clk or negedge i_reset_n) begin
             end
             else begin
                 priority casez (opcode)
+                // SH-family: store reg AND (high(base)+1). The base high byte is
+                // in effective_address[15:8] (the page-cross high fixup is
+                // skipped, so it stays high(base)). Listed before the STA/STX/
+                // STY/SAX arms these opcodes share opcode bits with.
+                OPCODE_SHY: bus_data_write <= register_y & (effective_address[15:8] + 8'b1);
+                OPCODE_SHX: bus_data_write <= register_x & (effective_address[15:8] + 8'b1);
+                OPCODE_SHA, OPCODE_SHA2, OPCODE_TAS:
+                    bus_data_write <= register_acc & register_x & (effective_address[15:8] + 8'b1);
                 OPCODE_TYPE_STA, OPCODE_PHA: bus_data_write <= register_acc;
                 OPCODE_PHP: begin
                     // Push SR with B=1 (bit 4 set) to indicate software source (PHP).
@@ -753,11 +767,24 @@ always @(negedge i_clk or negedge i_reset_n) begin
                         current_microinstruction <= next_active_microinstruction;
                     end
                     else if (operation == OP_ABSOLUTE_PAGE_CROSS) begin
-                        effective_address <= {alu_result, effective_address[7:0]};
-                        o_bus_addr <= {alu_result, effective_address[7:0]};
-                        current_microinstruction <= next_active_microinstruction;
-                        if (active_microinstruction == STORE)
+                        // SH-family stores skip the page-cross high-byte fixup:
+                        // the target keeps high(base) and the stored value
+                        // already masked it. Other ops apply the carried high
+                        // byte. The TAS S write lives in the register-file block
+                        // (single-driver), not here.
+                        priority casez (opcode)
+                        OPCODE_SHY, OPCODE_SHX, OPCODE_SHA, OPCODE_SHA2, OPCODE_TAS: begin
+                            o_bus_addr <= effective_address;
                             o_rw <= 0;
+                        end
+                        default: begin
+                            effective_address <= {alu_result, effective_address[7:0]};
+                            o_bus_addr <= {alu_result, effective_address[7:0]};
+                            if (active_microinstruction == STORE)
+                                o_rw <= 0;
+                        end
+                        endcase
+                        current_microinstruction <= next_active_microinstruction;
                     end
                 end
             end
@@ -900,9 +927,19 @@ always @(negedge i_clk) begin
         register_x <= 0;
         register_y <= 0;
         register_sp <= 0;
+        las_revert <= 0;
+        las_old_s <= 0;
     end
     else begin
         if (seq_advance) begin
+            // LAS abs,Y published A=X=S=M&old_S last cycle; revert X and S to
+            // old_S now (A keeps M&old_S). Runs before the case so a real
+            // register write this cycle still wins.
+            if (las_revert) begin
+                register_x  <= las_old_s;
+                register_sp <= las_old_s;
+            end
+            las_revert <= 0;
             case (active_microinstruction)
                 POP_STACK: register_sp <= register_sp + 8'b1;
                 PUSH_STACK, PUSH_PCL, PUSH_PCH, WRITE_SR: register_sp <= register_sp - 8'b1;
@@ -939,6 +976,16 @@ always @(negedge i_clk) begin
                     OPCODE_TYPE_LDA: register_acc <= i_bus_data;
                     OPCODE_TYPE_LDX: register_x <= i_bus_data;
                     OPCODE_TYPE_LDY: register_y <= i_bus_data;
+                    // LAS/LAR ($BB): publish A=X=S=M&old_S together now; the
+                    // las_revert restore reverts X and S to old_S next cycle, so
+                    // only A persists. Decoded before LAX so $BB lands here.
+                    OPCODE_LAS: begin
+                        register_acc <= i_bus_data & register_sp;
+                        register_x   <= i_bus_data & register_sp;
+                        register_sp  <= i_bus_data & register_sp;
+                        las_old_s    <= register_sp;
+                        las_revert   <= 1;
+                    end
                     OPCODE_TYPE_LAX: begin
                         register_acc <= i_bus_data;
                         register_x   <= i_bus_data;
@@ -972,6 +1019,17 @@ always @(negedge i_clk) begin
             // PULL_REGISTER beat itself reads the old-S dummy.
             if (prev_mi == PULL_REGISTER && opcode == OPCODE_PLA)
                 register_acc <= i_bus_data;
+
+            // TAS ($9B, SHS): the page-cross store cycle also copies A AND X
+            // into the stack pointer. register_sp is owned by this block, so
+            // the SP write lives here (not the sequencer block) to keep
+            // register_sp single-driver for synthesis. The store cycle is
+            // uniquely identified by active==STORE with operation in the
+            // page-cross state for the TAS opcode.
+            if (active_microinstruction == STORE
+                && operation == OP_ABSOLUTE_PAGE_CROSS
+                && opcode == OPCODE_TAS)
+                register_sp <= register_acc & register_x;
         end
     end
 end
@@ -1128,6 +1186,10 @@ always @(negedge i_clk) begin
                 status_negative <= alu_result[7];
                 status_zero <= alu_result == 0;
                 status_carry <= alu_carry_out;
+            end
+            OPCODE_LAS: begin
+                status_negative <= i_bus_data[7] & register_sp[7];
+                status_zero <= (i_bus_data & register_sp) == 0;
             end
             OPCODE_TYPE_LDA, OPCODE_TYPE_LDX, OPCODE_TYPE_LDY, OPCODE_TYPE_LAX: begin
                 status_negative <= i_bus_data[7];

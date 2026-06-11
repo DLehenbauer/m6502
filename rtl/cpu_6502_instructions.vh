@@ -108,6 +108,18 @@ localparam OPCODE_XAA  = 8'h8B;
 localparam OPCODE_AXS  = 8'hCB;
 localparam OPCODE_USBC = 8'hEB;
 
+// --- S/high-address coupled illegals (idealizer-overlay consensus) ---
+// LAS/LAR ($BB abs,Y): A = X = S = M AND old_S, published together for one
+// transient cycle; only A persists, X and S revert to old_S. The SH-family
+// stores reg AND (high(base)+1) at the un-fixed page {high(base),(low+idx)&FF}
+// (the page-cross high-byte fixup is skipped). TAS also writes S = A AND X.
+localparam OPCODE_LAS  = 8'hBB;
+localparam OPCODE_SHY  = 8'h9C;
+localparam OPCODE_SHX  = 8'h9E;
+localparam OPCODE_SHA  = 8'h9F;
+localparam OPCODE_SHA2 = 8'h93;
+localparam OPCODE_TAS  = 8'h9B;
+
 
 // --- cc=00: Control group — 8'baaa_xxx_00 ---
 //

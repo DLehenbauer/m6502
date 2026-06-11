@@ -43,6 +43,15 @@ always_comb begin
     OPCODE_JMP_IND:
         o_operand_type = INDIRECT;
 
+    // Undocumented SH-family stores: reg AND (high(base)+1). Decoded ahead of
+    // the STA/STY/STX/SAX patterns they share opcode bits with.
+    OPCODE_SHY:
+        o_operand_type = ABSOLUTE_X;
+    OPCODE_SHX, OPCODE_SHA, OPCODE_TAS:
+        o_operand_type = ABSOLUTE_Y;
+    OPCODE_SHA2:
+        o_operand_type = INDEX_Y_INDIRECT;
+
     OPCODE_TYPE_ORA, OPCODE_TYPE_AND, OPCODE_TYPE_EOR, OPCODE_TYPE_ADC,
     OPCODE_TYPE_STA, OPCODE_TYPE_LDA, OPCODE_TYPE_CMP, OPCODE_TYPE_SBC: begin
         case (instruction_mode)
@@ -105,6 +114,11 @@ always_comb begin
     OPCODE_ANC, OPCODE_ANC2, OPCODE_ALR, OPCODE_ARR,
     OPCODE_XAA, OPCODE_AXS, OPCODE_USBC:
         o_operand_type = IMMEDIATE;
+
+    // Undocumented LAS/LAR ($BB): abs,Y read, decoded ahead of the LAX pattern
+    // (it shares the LAX 101???11 opcode bits in mode 110).
+    OPCODE_LAS:
+        o_operand_type = ABSOLUTE_Y;
 
     // Undocumented LAX (load A and X): LDX-style addressing (zp,Y and abs,Y
     // for the indexed forms). The immediate slot ($AB) is the LXA opcode.

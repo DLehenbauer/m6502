@@ -91,12 +91,19 @@ localparam OPCODE_TYPE_DCP = 8'b110???11;
 localparam OPCODE_TYPE_ISB = 8'b111???11;
 
 // --- cc=11, mode 010: undocumented immediate ALU ops ---
-// Stable, idealizer-OFF illegals that match raw Perfect6502. AXS/SBX computes
-// X = (A AND X) - imm with CMP-style binary C/Z/N (no V, no decimal). USBC is
-// an exact SBC #imm alias (decimal-aware N/Z/C/V). XAA/ANE is the die-dependent
-// (A | CONST) AND X AND oper; the in-scope cases (oper=0 or A saturated) are
-// CONST-independent, so it models the portable A = X AND oper with N/Z from the
-// result. ANC/ANC2/ALR/ARR ($0B/$2B/$4B/$6B) are unstable and stay deferred.
+// AXS/SBX computes X = (A AND X) - imm with CMP-style binary C/Z/N (no V, no
+// decimal). USBC is an exact SBC #imm alias (decimal-aware N/Z/C/V). XAA/ANE is
+// the die-dependent (A | CONST) AND X AND oper; the in-scope cases (oper=0 or A
+// saturated) are CONST-independent, so it models the portable A = X AND oper.
+// ANC/ANC2 ($0B/$2B) = A AND imm with C copied from bit7. ALR ($4B) = LSR(A AND
+// imm). ARR ($6B) = ROR(A AND imm) through old carry with ADC-path C/V and a
+// decimal-mode BCD fixup. The ANC/ALR/ARR flag transients are operand-dependent
+// dynamic charge on raw silicon; the RTL targets the documented consensus the
+// idealizer overlay supplies (verify these with the overlay ON).
+localparam OPCODE_ANC  = 8'h0B;
+localparam OPCODE_ANC2 = 8'h2B;
+localparam OPCODE_ALR  = 8'h4B;
+localparam OPCODE_ARR  = 8'h6B;
 localparam OPCODE_XAA  = 8'h8B;
 localparam OPCODE_AXS  = 8'hCB;
 localparam OPCODE_USBC = 8'hEB;

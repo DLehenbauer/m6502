@@ -100,7 +100,9 @@ always_comb begin
 
     // Undocumented immediate ALU ops (cc=11, mode 010): decoded IMMEDIATE
     // ahead of the LAX/SAX/RMW-combo masks that would otherwise capture them
-    // ($8B->SAX, $CB->DCP, $EB->ISB). Priority casez gives the exact opcodes.
+    // ($0B/$2B/$4B/$6B->SLO/RLA/SRE/RRA, $8B->SAX, $CB->DCP, $EB->ISB).
+    // Priority casez gives the exact opcodes.
+    OPCODE_ANC, OPCODE_ANC2, OPCODE_ALR, OPCODE_ARR,
     OPCODE_XAA, OPCODE_AXS, OPCODE_USBC:
         o_operand_type = IMMEDIATE;
 

@@ -950,6 +950,11 @@ always @(negedge i_clk) begin
                     // cc=11 combos). AXS writes (A AND X) - imm to X; XAA writes
                     // A = X AND operand. USBC writes A via the ISB combo arm
                     // below, which commits the SBC result.
+                    OPCODE_ANC, OPCODE_ANC2: register_acc <= alu_result;
+                    OPCODE_ALR: register_acc <= {1'b0, alu_result[7:1]};
+                    OPCODE_ARR: register_acc <= status_decimal
+                        ? arr_dec_result
+                        : {status_carry, alu_result[7:1]};
                     OPCODE_AXS: register_x <= alu_result;
                     OPCODE_XAA: register_acc <= register_x & i_bus_data;
                     // RMW+ALU combos write the accumulator op result back to A
@@ -1079,6 +1084,29 @@ always @(negedge i_clk) begin
             // binary N/Z/C (no V); XAA commits N/Z from X AND operand. USBC has
             // no arm here: it is the SBC alias, so the ADC/SBC/RRA/ISB arm below
             // commits its decimal-aware N/Z/C/V.
+            OPCODE_ANC, OPCODE_ANC2: begin
+                // A AND imm with carry copied from the result's bit7 (as if an
+                // ASL/ROL had run). V is left untouched.
+                status_negative <= alu_result[7];
+                status_zero <= alu_result == 0;
+                status_carry <= alu_result[7];
+            end
+            OPCODE_ALR: begin
+                // LSR(A AND imm): N is always 0, C is the pre-shift bit0.
+                status_negative <= 1'b0;
+                status_zero <= alu_result[7:1] == 0;
+                status_carry <= alu_result[0];
+            end
+            OPCODE_ARR: begin
+                // ROR(A AND imm) through the old carry. N is the old carry; the
+                // ADC-path C/V make C = (A&imm)[7] and V = (A&imm)[7]^[6]. In
+                // decimal mode N/Z/V keep the binary-ROR values and C comes from
+                // the high-nibble BCD adjust.
+                status_negative <= status_carry;
+                status_zero <= {status_carry, alu_result[7:1]} == 0;
+                status_carry <= status_decimal ? arr_high_fix : alu_result[7];
+                status_overflow <= alu_result[7] ^ alu_result[6];
+            end
             OPCODE_AXS: begin
                 status_negative <= alu_result[7];
                 status_zero <= alu_result == 0;
@@ -1267,6 +1295,7 @@ always_comb begin
         // ~rmw_new, which is never loaded for a 2-cycle immediate). USBC is the
         // SBC alias. AXS subtracts the immediate from A AND X (CMP-style: ~imm
         // with carry-in forced, ALU_ADC default, decimal off -> binary).
+        OPCODE_ANC, OPCODE_ANC2, OPCODE_ALR, OPCODE_ARR: alu_operation = ALU_AND;
         OPCODE_USBC: begin
             alu_rhs = ~i_bus_data;
             alu_carry_in = status_carry;
@@ -1422,6 +1451,24 @@ cpu_6502_alu alu (
     .o_negative(alu_negative),
     .o_zero(alu_zero)
 );
+
+// NMOS decimal-mode ARR BCD fixup. ARR ANDs A with the immediate (alu_result),
+// rotates right through the old carry to form arr_bin, then in decimal mode
+// applies a per-nibble BCD correction to the stored byte. N/Z/V still come from
+// arr_bin; C comes from the high-nibble adjust. The fixup conditions test the
+// pre-rotate AND value (alu_result), which is the ARR-decimal quirk.
+wire [7:0] arr_bin = {status_carry, alu_result[7:1]};
+wire arr_low_fix  = (alu_result[3:0] + {4'b0, alu_result[0]}) > 5'd5;
+wire arr_high_fix = (alu_result[7:4] + {4'b0, alu_result[4]}) > 5'd5;
+// The low-nibble +6 intentionally does not propagate a carry into the high
+// nibble; the high-nibble +$60 is the separate adjust. This matches the overlay
+// consensus, not a full ripple BCD add.
+wire [7:0] arr_after_low = arr_low_fix
+    ? {arr_bin[7:4], arr_bin[3:0] + 4'h6}
+    : arr_bin;
+wire [7:0] arr_dec_result = arr_high_fix
+    ? arr_after_low + 8'h60
+    : arr_after_low;
 
 always_comb begin
     case (i_debug_sel)

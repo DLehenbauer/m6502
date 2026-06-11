@@ -165,6 +165,7 @@ always_comb begin
             endcase
         end
         OPCODE_TYPE_LDA, OPCODE_TYPE_LDX, OPCODE_TYPE_LDY,
+        OPCODE_TYPE_LAX,
         OPCODE_TYPE_AND, OPCODE_TYPE_ORA, OPCODE_TYPE_EOR,
         OPCODE_TYPE_ADC, OPCODE_TYPE_SBC, OPCODE_TYPE_CMP,
         OPCODE_TYPE_CPX, OPCODE_TYPE_CPY, OPCODE_TYPE_BIT: begin
@@ -185,7 +186,7 @@ always_comb begin
             default: ;
             endcase
         end
-        OPCODE_TYPE_STA, OPCODE_TYPE_STX, OPCODE_TYPE_STY: begin
+        OPCODE_TYPE_STA, OPCODE_TYPE_STX, OPCODE_TYPE_STY, OPCODE_TYPE_SAX: begin
             case (i_current_microinstruction)
             START: o_next_microinstruction = STORE;
             STORE: o_next_microinstruction = MICRO_EXECUTE;

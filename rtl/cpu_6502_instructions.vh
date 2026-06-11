@@ -54,6 +54,28 @@ localparam OPCODE_TYPE_LDX = 8'b101???10;
 localparam OPCODE_TYPE_DEC = 8'b110???10;
 localparam OPCODE_TYPE_INC = 8'b111???10;
 
+// --- cc=11: undocumented load (LAX) — 8'b101_xxx_11 ---
+// Loads memory into BOTH A and X. Addressing is the cc=11 load column:
+// (zp,X) zp imm abs (zp),Y zp,Y abs,Y (the indexed forms use Y, like LDX).
+// The immediate slot $AB (LXA) is modeled as A=X=operand; its raw NMOS value
+// is the unstable (A|CONST)&operand, but the conformance suite only pins
+// constant-independent operands.
+// NOTE: this mask also covers $BB, which is LAS (A=X=S=M&old_S), not LAX. LAS
+// reproduces the LAX abs,Y bus exactly, so it is correct under the Compatible
+// (pin-only) contract; its S/register semantics are added by the LAS class
+// (idealizer-ON phase) and are register-state only.
+localparam OPCODE_TYPE_LAX = 8'b101???11;
+
+// --- cc=11: undocumented store (SAX) — 8'b100_xxx_11 ---
+// Stores A AND X to memory (the precharged-bus wired-AND of the A and X
+// drivers); affects no flags. Addressing mirrors STX ((zp,X) zp abs zp,Y).
+// NOTE: this mask also covers $8B (ANE imm), $93/$9F (SHA), and $9B (TAS).
+// Those are decoded IMPLIED here and run a benign no-write op (o_rw stays
+// read); their real immediate/store-with-high-byte-mask semantics are added
+// by the ANE and SH-family classes (idealizer-ON phase).
+localparam OPCODE_TYPE_SAX = 8'b100???11;
+
+
 // --- cc=00: Control group — 8'baaa_xxx_00 ---
 //
 //  bbb | Mode

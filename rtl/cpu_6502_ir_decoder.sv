@@ -98,6 +98,33 @@ always_comb begin
         endcase
     end
 
+    // Undocumented LAX (load A and X): LDX-style addressing (zp,Y and abs,Y
+    // for the indexed forms). The immediate slot ($AB) is the LXA opcode.
+    OPCODE_TYPE_LAX: begin
+        case (instruction_mode)
+            3'b000: o_operand_type = INDEX_X_INDIRECT;
+            3'b001: o_operand_type = ZP;
+            3'b010: o_operand_type = IMMEDIATE;
+            3'b011: o_operand_type = ABSOLUTE;
+            3'b100: o_operand_type = INDEX_Y_INDIRECT;
+            3'b101: o_operand_type = ZP_Y;
+            3'b110: o_operand_type = ABSOLUTE_Y;
+            3'b111: o_operand_type = ABSOLUTE_Y;
+        endcase
+    end
+
+    // Undocumented SAX (store A AND X): STX-style addressing (zp,Y for the
+    // indexed form). No immediate or absolute,Y form.
+    OPCODE_TYPE_SAX: begin
+        case (instruction_mode)
+            3'b000: o_operand_type = INDEX_X_INDIRECT;
+            3'b001: o_operand_type = ZP;
+            3'b011: o_operand_type = ABSOLUTE;
+            3'b101: o_operand_type = ZP_Y;
+            default: o_operand_type = IMPLIED;
+        endcase
+    end
+
     OPCODE_TYPE_BIT: begin
         case (instruction_mode)
             3'b001: o_operand_type = ZP;

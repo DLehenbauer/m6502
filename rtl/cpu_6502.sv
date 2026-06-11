@@ -328,6 +328,7 @@ always @(negedge i_clk or negedge i_reset_n) begin
                                         status_interrupt, status_zero, status_carry};
                 end
                 OPCODE_TYPE_STX: bus_data_write <= register_x;
+                OPCODE_TYPE_SAX: bus_data_write <= register_acc & register_x;
                 OPCODE_TYPE_STY: bus_data_write <= register_y;
                 OPCODE_BRK: begin
                     if (active_microinstruction == WRITE_SR)
@@ -915,6 +916,10 @@ always @(negedge i_clk) begin
                     OPCODE_TYPE_LDA: register_acc <= i_bus_data;
                     OPCODE_TYPE_LDX: register_x <= i_bus_data;
                     OPCODE_TYPE_LDY: register_y <= i_bus_data;
+                    OPCODE_TYPE_LAX: begin
+                        register_acc <= i_bus_data;
+                        register_x   <= i_bus_data;
+                    end
                     OPCODE_TYPE_ADC, OPCODE_TYPE_AND, OPCODE_TYPE_ORA,
                     OPCODE_TYPE_EOR, OPCODE_TYPE_SBC:
                         register_acc <= alu_result;
@@ -1035,7 +1040,7 @@ always @(negedge i_clk) begin
                 status_negative <= alu_result[7];
                 status_zero <= alu_result == 0;
             end
-            OPCODE_TYPE_LDA, OPCODE_TYPE_LDX, OPCODE_TYPE_LDY: begin
+            OPCODE_TYPE_LDA, OPCODE_TYPE_LDX, OPCODE_TYPE_LDY, OPCODE_TYPE_LAX: begin
                 status_negative <= i_bus_data[7];
                 status_zero <= i_bus_data == 0;
             end

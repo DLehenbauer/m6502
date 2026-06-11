@@ -75,6 +75,21 @@ localparam OPCODE_TYPE_LAX = 8'b101???11;
 // by the ANE and SH-family classes (idealizer-ON phase).
 localparam OPCODE_TYPE_SAX = 8'b100???11;
 
+// --- cc=11: undocumented read-modify-write + ALU combos ---
+// Each performs the cc=10 modify on memory, then the cc=01 accumulator ALU
+// op against the modified byte (the die double-matches both decode columns):
+// SLO=ASL+ORA, RLA=ROL+AND, SRE=LSR+EOR, RRA=ROR+ADC, DCP=DEC+CMP, ISB=INC+SBC.
+// Addressing follows the cc=01 group plus (zp,X)/(zp),Y and absolute,Y forms.
+// NOTE: the bbb=010 immediate slots ($0B/$2B/$4B/$6B/$CB/$EB) are the
+// immediate ALU illegals (ANC/ALR/ARR/AXS/USBC), not RMW; they decode IMPLIED
+// here and are overridden by the immediate-illegal classes via priority.
+localparam OPCODE_TYPE_SLO = 8'b000???11;
+localparam OPCODE_TYPE_RLA = 8'b001???11;
+localparam OPCODE_TYPE_SRE = 8'b010???11;
+localparam OPCODE_TYPE_RRA = 8'b011???11;
+localparam OPCODE_TYPE_DCP = 8'b110???11;
+localparam OPCODE_TYPE_ISB = 8'b111???11;
+
 
 // --- cc=00: Control group — 8'baaa_xxx_00 ---
 //

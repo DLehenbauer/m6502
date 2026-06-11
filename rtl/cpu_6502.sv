@@ -705,12 +705,18 @@ always @(negedge i_clk or negedge i_reset_n) begin
                         else begin
                             priority casez (opcode)
                             OPCODE_TYPE_INC, OPCODE_TYPE_DEC, OPCODE_TYPE_ROR, OPCODE_TYPE_ROL, OPCODE_TYPE_ASL,
-                            OPCODE_TYPE_LSR: begin
-                                // Post-indexed RMW (abs,X) always spends the
-                                // mandatory corrected-address read cycle. Plain
-                                // absolute has no post-index, so it reads once
-                                // and proceeds straight to the modify/writeback.
-                                if (addressing_mode == ABSOLUTE_X)
+                            OPCODE_TYPE_LSR,
+                            OPCODE_TYPE_SLO, OPCODE_TYPE_RLA, OPCODE_TYPE_SRE,
+                            OPCODE_TYPE_RRA, OPCODE_TYPE_DCP, OPCODE_TYPE_ISB: begin
+                                // Post-indexed RMW (abs,X for the legal ops;
+                                // abs,X / abs,Y / (zp),Y for the combos) always
+                                // spends the mandatory corrected-address read
+                                // cycle, even with no page cross. Plain absolute
+                                // and the pre-indexed (zp,X) have no post-index,
+                                // so they read once and proceed to modify/write.
+                                if (addressing_mode == ABSOLUTE_X
+                                    || addressing_mode == ABSOLUTE_Y
+                                    || addressing_mode == INDEX_Y_INDIRECT)
                                     operation <= OP_ABSOLUTE_PAGE_CROSS;
                                 else
                                     current_microinstruction <= next_active_microinstruction;
@@ -923,6 +929,11 @@ always @(negedge i_clk) begin
                     OPCODE_TYPE_ADC, OPCODE_TYPE_AND, OPCODE_TYPE_ORA,
                     OPCODE_TYPE_EOR, OPCODE_TYPE_SBC:
                         register_acc <= alu_result;
+                    // RMW+ALU combos write the accumulator op result back to A
+                    // (DCP only compares, so it leaves A unchanged).
+                    OPCODE_TYPE_SLO, OPCODE_TYPE_RLA, OPCODE_TYPE_SRE,
+                    OPCODE_TYPE_RRA, OPCODE_TYPE_ISB:
+                        register_acc <= alu_result;
                     default: ;
                     endcase
                 end
@@ -1040,14 +1051,29 @@ always @(negedge i_clk) begin
                 status_negative <= alu_result[7];
                 status_zero <= alu_result == 0;
             end
+            // RMW+ALU combos: the accumulator op commits its flags here.
+            // SLO/RLA/SRE leave C from the shift (set at ALU_MODIFY); their
+            // ORA/AND/EOR only set N/Z. DCP's CMP sets N/Z/C (binary). RRA/ISB
+            // join the ADC/SBC arm below for the decimal-aware N/Z/C/V taps.
+            OPCODE_TYPE_SLO, OPCODE_TYPE_RLA, OPCODE_TYPE_SRE: begin
+                status_negative <= alu_result[7];
+                status_zero <= alu_result == 0;
+            end
+            OPCODE_TYPE_DCP: begin
+                status_negative <= alu_result[7];
+                status_zero <= alu_result == 0;
+                status_carry <= alu_carry_out;
+            end
             OPCODE_TYPE_LDA, OPCODE_TYPE_LDX, OPCODE_TYPE_LDY, OPCODE_TYPE_LAX: begin
                 status_negative <= i_bus_data[7];
                 status_zero <= i_bus_data == 0;
             end
-            OPCODE_TYPE_ADC, OPCODE_TYPE_SBC: begin
+            OPCODE_TYPE_ADC, OPCODE_TYPE_SBC,
+            OPCODE_TYPE_RRA, OPCODE_TYPE_ISB: begin
                 // N and Z come from the ALU's selected tap (binary or, in
                 // decimal mode, the pre-correction value), not the final
-                // BCD-corrected result byte.
+                // BCD-corrected result byte. RRA/ISB reuse the decimal-aware
+                // ADC/SBC taps.
                 status_negative <= alu_negative;
                 status_zero <= alu_zero;
                 status_carry <= alu_carry_out;
@@ -1068,6 +1094,12 @@ always @(negedge i_clk) begin
                 status_negative <= alu_result[7];
                 status_zero <= alu_result == 0;
             end
+            // RMW+ALU shift combos publish the shift carry now. For SLO/RLA/SRE
+            // it is the final C (the ORA/AND/EOR at MICRO_EXECUTE leave C); for
+            // RRA it is the ROR carry-out that feeds the ADC carry-in. N/Z come
+            // from the accumulator op at MICRO_EXECUTE.
+            OPCODE_TYPE_SLO, OPCODE_TYPE_RLA, OPCODE_TYPE_SRE, OPCODE_TYPE_RRA:
+                status_carry <= alu_carry_out;
             default: ;
             endcase
         end
@@ -1193,6 +1225,40 @@ always_comb begin
             alu_decimal = status_decimal;
             alu_operation = ALU_SBC;
         end
+        // RMW+ALU combos: the accumulator op runs against the modified byte
+        // latched in rmw_new (the bus is mid-write this cycle, so i_bus_data
+        // is not the operand). alu_lhs defaults to register_acc above.
+        OPCODE_TYPE_SLO: begin
+            alu_rhs = rmw_new;
+            alu_operation = ALU_ORA;
+        end
+        OPCODE_TYPE_RLA: begin
+            alu_rhs = rmw_new;
+            alu_operation = ALU_AND;
+        end
+        OPCODE_TYPE_SRE: begin
+            alu_rhs = rmw_new;
+            alu_operation = ALU_EOR;
+        end
+        OPCODE_TYPE_RRA: begin
+            alu_rhs = rmw_new;
+            alu_carry_in = status_carry;
+            alu_decimal = status_decimal;
+            alu_operation = ALU_ADC;
+        end
+        OPCODE_TYPE_DCP: begin
+            // CMP is always binary: subtract via ADC of the complement with
+            // carry-in 1, no decimal correction.
+            alu_rhs = ~rmw_new;
+            alu_carry_in = 1;
+            alu_operation = ALU_ADC;
+        end
+        OPCODE_TYPE_ISB: begin
+            alu_rhs = ~rmw_new;
+            alu_carry_in = status_carry;
+            alu_decimal = status_decimal;
+            alu_operation = ALU_SBC;
+        end
         OPCODE_TYPE_ROR: begin
             if (opcode == OPCODE_ROR_ACC)
                 alu_lhs = register_acc;
@@ -1257,6 +1323,31 @@ always_comb begin
             alu_operation = ALU_ASL;
         end
         OPCODE_TYPE_LSR: begin
+            alu_carry_in = 0;
+            alu_rhs = 0;
+            alu_operation = ALU_LSR;
+        end
+        // RMW+ALU combos: the modify half (ALU_MODIFY) is the same shift/inc/
+        // dec as the legal op; alu_lhs = i_bus_data above. ISB=INC, DCP=DEC,
+        // RRA=ROR, RLA=ROL, SLO=ASL, SRE=LSR.
+        OPCODE_TYPE_ISB: alu_rhs = 1;
+        OPCODE_TYPE_DCP: alu_rhs = 8'hff;
+        OPCODE_TYPE_RRA: begin
+            alu_rhs = 0;
+            alu_operation = ALU_ROR;
+            alu_carry_in = status_carry;
+        end
+        OPCODE_TYPE_RLA: begin
+            alu_rhs = 0;
+            alu_operation = ALU_ROL;
+            alu_carry_in = status_carry;
+        end
+        OPCODE_TYPE_SLO: begin
+            alu_carry_in = 0;
+            alu_rhs = 0;
+            alu_operation = ALU_ASL;
+        end
+        OPCODE_TYPE_SRE: begin
             alu_carry_in = 0;
             alu_rhs = 0;
             alu_operation = ALU_LSR;

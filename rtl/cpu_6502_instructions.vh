@@ -90,6 +90,17 @@ localparam OPCODE_TYPE_RRA = 8'b011???11;
 localparam OPCODE_TYPE_DCP = 8'b110???11;
 localparam OPCODE_TYPE_ISB = 8'b111???11;
 
+// --- cc=11, mode 010: undocumented immediate ALU ops ---
+// Stable, idealizer-OFF illegals that match raw Perfect6502. AXS/SBX computes
+// X = (A AND X) - imm with CMP-style binary C/Z/N (no V, no decimal). USBC is
+// an exact SBC #imm alias (decimal-aware N/Z/C/V). XAA/ANE is the die-dependent
+// (A | CONST) AND X AND oper; the in-scope cases (oper=0 or A saturated) are
+// CONST-independent, so it models the portable A = X AND oper with N/Z from the
+// result. ANC/ANC2/ALR/ARR ($0B/$2B/$4B/$6B) are unstable and stay deferred.
+localparam OPCODE_XAA  = 8'h8B;
+localparam OPCODE_AXS  = 8'hCB;
+localparam OPCODE_USBC = 8'hEB;
+
 
 // --- cc=00: Control group — 8'baaa_xxx_00 ---
 //

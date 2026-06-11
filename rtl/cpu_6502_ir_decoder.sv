@@ -98,6 +98,12 @@ always_comb begin
         endcase
     end
 
+    // Undocumented immediate ALU ops (cc=11, mode 010): decoded IMMEDIATE
+    // ahead of the LAX/SAX/RMW-combo masks that would otherwise capture them
+    // ($8B->SAX, $CB->DCP, $EB->ISB). Priority casez gives the exact opcodes.
+    OPCODE_XAA, OPCODE_AXS, OPCODE_USBC:
+        o_operand_type = IMMEDIATE;
+
     // Undocumented LAX (load A and X): LDX-style addressing (zp,Y and abs,Y
     // for the indexed forms). The immediate slot ($AB) is the LXA opcode.
     OPCODE_TYPE_LAX: begin

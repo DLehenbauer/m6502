@@ -929,6 +929,12 @@ always @(negedge i_clk) begin
                     OPCODE_TYPE_ADC, OPCODE_TYPE_AND, OPCODE_TYPE_ORA,
                     OPCODE_TYPE_EOR, OPCODE_TYPE_SBC:
                         register_acc <= alu_result;
+                    // Undocumented immediate ALU ops (exact opcodes before the
+                    // cc=11 combos). AXS writes (A AND X) - imm to X; XAA writes
+                    // A = X AND operand. USBC writes A via the ISB combo arm
+                    // below, which commits the SBC result.
+                    OPCODE_AXS: register_x <= alu_result;
+                    OPCODE_XAA: register_acc <= register_x & i_bus_data;
                     // RMW+ALU combos write the accumulator op result back to A
                     // (DCP only compares, so it leaves A unchanged).
                     OPCODE_TYPE_SLO, OPCODE_TYPE_RLA, OPCODE_TYPE_SRE,
@@ -1050,6 +1056,20 @@ always @(negedge i_clk) begin
             OPCODE_TYPE_AND, OPCODE_TYPE_EOR, OPCODE_TYPE_ORA: begin
                 status_negative <= alu_result[7];
                 status_zero <= alu_result == 0;
+            end
+            // Undocumented immediate ALU ops (exact opcodes before the cc=11
+            // combos so they win the priority casez). AXS commits CMP-style
+            // binary N/Z/C (no V); XAA commits N/Z from X AND operand. USBC has
+            // no arm here: it is the SBC alias, so the ADC/SBC/RRA/ISB arm below
+            // commits its decimal-aware N/Z/C/V.
+            OPCODE_AXS: begin
+                status_negative <= alu_result[7];
+                status_zero <= alu_result == 0;
+                status_carry <= alu_carry_out;
+            end
+            OPCODE_XAA: begin
+                status_negative <= register_x[7] & i_bus_data[7];
+                status_zero <= (register_x & i_bus_data) == 0;
             end
             // RMW+ALU combos: the accumulator op commits its flags here.
             // SLO/RLA/SRE leave C from the shift (set at ALU_MODIFY); their
@@ -1224,6 +1244,22 @@ always_comb begin
             alu_carry_in = status_carry;
             alu_decimal = status_decimal;
             alu_operation = ALU_SBC;
+        end
+        // Undocumented immediate ALU ops (placed before the cc=11 combos so
+        // the exact opcodes win the priority casez; $CB->DCP and $EB->ISB use
+        // ~rmw_new, which is never loaded for a 2-cycle immediate). USBC is the
+        // SBC alias. AXS subtracts the immediate from A AND X (CMP-style: ~imm
+        // with carry-in forced, ALU_ADC default, decimal off -> binary).
+        OPCODE_USBC: begin
+            alu_rhs = ~i_bus_data;
+            alu_carry_in = status_carry;
+            alu_decimal = status_decimal;
+            alu_operation = ALU_SBC;
+        end
+        OPCODE_AXS: begin
+            alu_lhs = register_acc & register_x;
+            alu_rhs = ~i_bus_data;
+            alu_carry_in = 1;
         end
         // RMW+ALU combos: the accumulator op runs against the modified byte
         // latched in rmw_new (the bus is mid-write this cycle, so i_bus_data

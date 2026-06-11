@@ -32,6 +32,18 @@ always_comb begin
     end
     else begin
         priority casez (i_current_instruction)
+        // NMOS illegal JAM/KIL opcodes. After the opcode fetch and the operand
+        // dummy read the core enters the JAM state and stays there: SYNC never
+        // re-asserts and the bus walks the dead-cycle address pattern until RES.
+        // Listed before any type pattern so the cc=10 masks (ASL/ROL/LSR/ROR/
+        // STX/LDX/DEC/INC) cannot claim these opcodes.
+        8'h02, 8'h12, 8'h22, 8'h32, 8'h42, 8'h52,
+        8'h62, 8'h72, 8'h92, 8'hB2, 8'hD2, 8'hF2: begin
+            case (i_current_microinstruction)
+            START: o_next_microinstruction = JAM;
+            default: o_next_microinstruction = JAM;
+            endcase
+        end
         OPCODE_SEC, OPCODE_CLC, OPCODE_SEI, OPCODE_CLI, OPCODE_TAX,
         OPCODE_TAY, OPCODE_TXA, OPCODE_TYA, OPCODE_TSX, OPCODE_TXS,
         OPCODE_INX, OPCODE_INY, OPCODE_DEY, OPCODE_DEX, OPCODE_CLD,

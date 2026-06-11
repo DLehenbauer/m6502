@@ -41,7 +41,12 @@ package cpu_6502_pkg;
         // bus intent (write, drive rmw_new) is carried by the STATE, not by an
         // opcode test, so the illegal RMW+ALU combos (IL3) inherit both write
         // beats unchanged.
-        RMW_WRITE_NEW = 34
+        RMW_WRITE_NEW = 34,
+        // NMOS illegal JAM/KIL dead-state. The 12 opcodes $02/$12/.../$F2 enter
+        // this state after their fetch and never leave until RES: SYNC stays
+        // low and the address bus walks the dead pattern FFFF, FFFE, FFFE, then
+        // FFFF forever.
+        JAM = 35
     } microinstruction_t;
 
 endpackage

@@ -133,7 +133,7 @@ reg first_microinstruction;
 // the negedge i_clk that starts each opcode-fetch cycle) meets this timing. We
 // require combinational logic here because we need the post-edge values of
 // handle_irq/handle_nmi.
-assign o_sync = first_microinstruction && !handle_irq && !handle_nmi;
+assign o_sync = first_microinstruction;
 
 microinstruction_t current_microinstruction, prev_mi;
 reg [7:0] current_instruction;
@@ -228,15 +228,53 @@ always @(posedge o_phi2 or negedge i_reset_n) begin
 end
 
 reg nmi_n_sync, nmi_n_sync2, prev_nmi_n, pending_nmi;
-always @(negedge i_clk or negedge i_reset_n) begin
+reg irq_n_sync, irq_n_sync2;
+
+// NMOS samples the asynchronous /IRQ and /NMI pins during phi2 (the read
+// half-cycle, the same edge the SO detector and rdy_q use). Capturing the
+// first synchronizer stage on the phi2 posedge means an interrupt asserted
+// on phi2 of a cycle is seen that same cycle; sampling on the negedge missed
+// a phi2 assertion by a full cycle and deferred the interrupt a whole
+// instruction on short (two-cycle) ops where the recognition window is tight.
+always @(posedge o_phi2 or negedge i_reset_n) begin
     if (!i_reset_n) begin
         nmi_n_sync <= 1;
-        nmi_n_sync2 <= 1;
+        irq_n_sync <= 1;
     end else begin
-        nmi_n_sync2 <= nmi_n_sync;
         nmi_n_sync <= i_nmi_n;
+        irq_n_sync <= i_irq_n;
     end
 end
+
+// Second synchronizer stage, on the negedge that drives recognition.
+always @(negedge i_clk or negedge i_reset_n) begin
+    if (!i_reset_n) begin
+        nmi_n_sync2 <= 1;
+        irq_n_sync2 <= 1;
+    end else begin
+        nmi_n_sync2 <= nmi_n_sync;
+        irq_n_sync2 <= irq_n_sync;
+    end
+end
+
+// A freshly synchronized NMI falling edge. pending_nmi latches this for
+// recognition at a later instruction boundary, but pending_nmi is a
+// non-blocking register: on the negedge the edge is detected it still reads
+// 0. When the edge lands exactly on an instruction boundary the recognition
+// must see it this cycle, so consult the combinational edge alongside the
+// latched pending_nmi.
+wire nmi_edge_now = prev_nmi_n && !nmi_n_sync2;
+
+// NMI edge recognized at the LOAD_VECTOR cycle of an in-flight IRQ or BRK
+// entry hijacks it to the NMI vector. Accept either the combinational edge
+// (an edge synchronizing exactly on LOAD_VECTOR, before pending_nmi
+// registers it) or the latched pending_nmi (an edge from a cycle earlier
+// whose push-cycle hijack window has not yet steered it). handle_nmi is set
+// from this AFTER the SR push, so the pushed B image is unaffected; gated on
+// !handle_nmi so an edge already consumed does not re-fire.
+wire nmi_load_vector_hijack = (nmi_edge_now || pending_nmi) && !handle_nmi
+    && (handle_irq || opcode == OPCODE_BRK)
+    && active_microinstruction == LOAD_VECTOR;
 
 
 always @(negedge i_clk or negedge i_reset_n) begin
@@ -393,7 +431,11 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 current_microinstruction <= next_active_microinstruction;
             end
             else if (active_microinstruction == READ_ADL) begin
-                program_counter <= program_counter + 2;
+                // BRK advances PC past its padding byte. IRQ/NMI entry re-reads
+                // the same PC (dummy) and must NOT advance it; the unmodified PC
+                // is what gets pushed.
+                if (!handle_irq && !handle_nmi)
+                    program_counter <= program_counter + 2;
                 current_microinstruction <= next_active_microinstruction;
             end
             else if (active_microinstruction == BUFFER_ADL) begin
@@ -471,7 +513,9 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 // entries select their own vectors. Reset reaches LOAD_VECTOR
                 // via the BRK frame now, so the vector source must be selected
                 // here (the old direct init jump pre-loaded $FFFC instead).
-                o_bus_addr <= init ? RESET_VECTOR : (handle_nmi ? NMI_VECTOR : IRQ_VECTOR);
+                o_bus_addr <= init ? RESET_VECTOR
+                            : (handle_nmi || nmi_load_vector_hijack) ? NMI_VECTOR
+                            : IRQ_VECTOR;
             end
             else if (active_microinstruction == MAYBE_BRANCH) begin
                 if (first_microinstruction) begin
@@ -746,15 +790,73 @@ always @(negedge i_clk or negedge i_reset_n) begin
                 default: ;
             endcase
 
-            if (next_active_microinstruction == START && !i_irq_n && !status_interrupt && !handle_irq && !handle_nmi) begin
+            // Interrupt recognition poll, at the instruction boundary
+            // (next mi == START). IRQ is level-sensitive, sampled through the
+            // synchronizer (irq_n_sync2). NMI is the edge (pending_nmi or the
+            // combinational nmi_edge_now). NMI effectively wins: when IRQ fires
+            // first the still-pending NMI hijacks the entry below to the NMI
+            // vector, and IRQ/NMI both push B=0, so the visible result matches.
+            // Two recognition guards beyond the I mask:
+            //  - BRK commits I as it completes (active==MICRO_EXECUTE, opcode
+            //    BRK). status_interrupt commits on this same edge so it still
+            //    reads 0; treat BRK's pending I-set as masking the IRQ poll for
+            //    the handler's first instruction.
+            //  - A taken branch runs an extra execute cycle (MICRO_EXECUTE with
+            //    next_active already START). NMOS does not poll interrupts on
+            //    that cycle, so an interrupt arriving during a taken branch is
+            //    deferred past the target instruction. branch_taken is nonzero
+            //    only for branch opcodes; not-taken branches poll normally. The
+            //    oracle defers both same-page and page-crossing taken branches
+            //    here (probe-matched for this corpus; the page-dependent story
+            //    is Visual6502 lore not exercised by these tests).
+            if (next_active_microinstruction == START && !irq_n_sync2 && !status_interrupt
+                && !handle_irq && !handle_nmi
+                && !(active_microinstruction == MICRO_EXECUTE && opcode == OPCODE_BRK)
+                && !(branch_taken && active_microinstruction == MICRO_EXECUTE)) begin
                 handle_irq <= 1;
-                o_bus_addr <= {8'b1, register_sp};
             end
-            else if (next_active_microinstruction == START && pending_nmi && !handle_irq && !handle_nmi && !init) begin
+            else if (next_active_microinstruction == START && (pending_nmi || nmi_edge_now)
+                && !handle_irq && !handle_nmi && !init
+                && !(active_microinstruction == MICRO_EXECUTE && opcode == OPCODE_BRK)
+                && !(branch_taken && active_microinstruction == MICRO_EXECUTE)) begin
                 handle_irq <= 1;
                 handle_nmi <= 1;
                 pending_nmi <= 0;
-                o_bus_addr <= {8'b1, register_sp};
+            end
+
+            // NMI late vector steering. The vector source is late-bound: an NMI
+            // edge latched during an in-flight IRQ or BRK entry redirects it to
+            // the NMI vector. This only steers LOAD_VECTOR; the pushed P image
+            // (BRK B=1, IRQ B=0) was already fixed at WRITE_SR by the opcode /
+            // handle_irq state, so a hijacked BRK still pushes B=1 and a
+            // hijacked IRQ still pushes B=0.
+            //  - push-cycle hijack window (PUSH_PCH..WRITE_SR, and BRK's
+            //    READ_ADL signature cycle): a registered pending_nmi steers it.
+            //  - LOAD_VECTOR same-cycle race: handled by nmi_load_vector_hijack,
+            //    which also consults the combinational edge.
+            //  - absorbed regime: an NMI edge arriving in BRK's vector tail
+            //    (READ_VECTOR_HI / MICRO_EXECUTE) is too late to steer the
+            //    vector but is consumed by the in-progress BRK sequence on
+            //    NMOS; BRK completes through $FFFE and the edge is NOT
+            //    separately serviced. An edge one cycle later survives as a
+            //    normal deferred NMI.
+            if (pending_nmi && !handle_nmi && (handle_irq || opcode == OPCODE_BRK)
+                && (active_microinstruction == READ_ADL
+                    || active_microinstruction == PUSH_PCH
+                    || active_microinstruction == PUSH_PCL
+                    || active_microinstruction == WRITE_SR)) begin
+                handle_nmi <= 1;
+                pending_nmi <= 0;
+            end
+            else if (nmi_load_vector_hijack) begin
+                handle_nmi <= 1;
+                pending_nmi <= 0;
+            end
+            else if ((pending_nmi || nmi_edge_now) && !handle_nmi
+                && opcode == OPCODE_BRK
+                && (active_microinstruction == READ_VECTOR_HI
+                    || active_microinstruction == MICRO_EXECUTE)) begin
+                pending_nmi <= 0;
             end
         end
     end

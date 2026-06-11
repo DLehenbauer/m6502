@@ -15,7 +15,12 @@ always_comb begin
 
     if (i_handle_irq || i_init) begin
         priority casez (i_current_microinstruction)
-            START: o_next_microinstruction = PUSH_PCH;
+            // IRQ/NMI entry reads the (discarded) opcode at PC with SYNC, then
+            // a dummy read at PC (READ_ADL), before pushing. Reset (i_init)
+            // skips the dummy read and goes straight to the read-only stack
+            // sequence.
+            START: o_next_microinstruction = i_handle_irq ? READ_ADL : PUSH_PCH;
+            READ_ADL: o_next_microinstruction = PUSH_PCH;
             PUSH_PCH: o_next_microinstruction = PUSH_PCL;
             PUSH_PCL: o_next_microinstruction = WRITE_SR;
             WRITE_SR: o_next_microinstruction = LOAD_VECTOR;

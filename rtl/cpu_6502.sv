@@ -221,9 +221,9 @@ always @(negedge i_clk or negedge i_reset_n) begin
         prev_nmi_n <= 1;
         pending_nmi <= 0;
 
-        // Initialize `opcode` to NOP so the vector-load MICRO_EXECUTE at the end
+        // Initialize `opcode` to BRK so the vector-load MICRO_EXECUTE at the end
         // of the init sequence preserves the just-reset flags and registers.
-        opcode <= OPCODE_NOP;
+        opcode <= OPCODE_BRK;
     end
     else begin
         prev_nmi_n <= nmi_n_sync2;
